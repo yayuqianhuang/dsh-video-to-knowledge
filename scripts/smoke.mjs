@@ -55,6 +55,9 @@ mod.apply(ctx);
 const EXPECT = ['vk_doctor', 'vk_config', 'vk_prepare', 'vk_run', 'ajtc_run_chain', 'ajtc_list_chains', 'ajtc_recall_memory'];
 for (const n of EXPECT) check(`tool ${n} registered`, tools.has(n), `(got ${[...tools.keys()].join(',')})`);
 check('tools have inputSchema', [...tools.values()].every((t) => t.inputSchema && t.inputSchema.type === 'object'));
+// 宿主校验：output.render 必须是函数，output.schema 须落在受支持子集内
+check('every tool declares output {schema, render}',
+  [...tools.values()].every((t) => t.output && t.output.schema && typeof t.output.render === 'function'));
 check('system prompt section injected', typeof ctx._prompt === 'function');
 
 /* 2b. 不发布客户端 → 不应声明 dsh.client（否则是空声明） */

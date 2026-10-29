@@ -282,6 +282,34 @@ async function runPy(scriptName, args, { workDir, cookiesPath, timeoutMs } = {})
   }
 }
 
+/** 工具输出契约：宿主强制要求每个工具声明 output { schema, render }。
+ *  execute 统一返回 { content: [{type:'text',text}] }，render 直接透传。 */
+const TEXT_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    content: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { type: { type: 'string' }, text: { type: 'string' } },
+        required: ['type'],
+      },
+    },
+  },
+  required: ['content'],
+}
+
+function textOutput() {
+  return {
+    schema: TEXT_OUTPUT_SCHEMA,
+    render: (_args, value) => {
+      if (value && Array.isArray(value.content)) return value.content
+      if (typeof value === 'string') return [{ type: 'text', text: value }]
+      return [{ type: 'text', text: JSON.stringify(value ?? null, null, 2) }]
+    },
+  }
+}
+
 function textResult(text) {
   return { content: [{ type: 'text', text: String(text) }] }
 }
@@ -375,6 +403,7 @@ export function apply(ctx) {
       },
       required: [],
     },
+    output: textOutput(),
     async execute({ url = '', workDir, cookiesPath } = {}) {
       const wd = resolveWorkDir(workDir)
       const ck = cfg('cookiesPath', cookiesPath)
@@ -428,6 +457,7 @@ export function apply(ctx) {
       },
       required: ['url'],
     },
+    output: textOutput(),
     async execute({ url, workDir, cookiesPath, lang = 'zh-CN', refresh = false } = {}) {
       const wd = resolveWorkDir(workDir)
       const ck = cfg('cookiesPath', cookiesPath)
@@ -505,6 +535,7 @@ export function apply(ctx) {
       },
       required: ['url', 'kbPath'],
     },
+    output: textOutput(),
     async execute({ url, videoId, kbPath, collection = 'bilibili', mode = 'upload', outlinePath,
       cardsDir, outputDir, workDir, cookiesPath, strict = false } = {}) {
       const od = resolveOutputDir(outputDir || workDir)
@@ -595,6 +626,7 @@ export function apply(ctx) {
       },
       required: [],
     },
+    output: textOutput(),
     async execute({ action = 'get', key, value } = {}) {
       const file = readConfigFile()
 
@@ -661,6 +693,7 @@ export function apply(ctx) {
       },
       required: ['chainId'],
     },
+    output: textOutput(),
     async execute({ chainId, goal = '', json = true }) {
       const args = ['run', String(chainId), '--mock', json ? '--json' : '', '--quiet'].filter(Boolean)
       if (goal) args.push('--goal', goal)
@@ -674,6 +707,7 @@ export function apply(ctx) {
     name: 'ajtc_list_chains',
     description: '列出 AJTC 引擎中已注册的全部触发链（id / 标题 / 节点数）。',
     inputSchema: { type: 'object', properties: {}, required: [] },
+    output: textOutput(),
     async execute() {
       const chains = listChains()
       if (chains.length === 0) return textResult('(未找到任何链)')
@@ -693,6 +727,7 @@ export function apply(ctx) {
       },
       required: ['query'],
     },
+    output: textOutput(),
     async execute({ query, max = 6 }) {
       return textResult(recallMemory(query, Number(max) || 6))
     },
