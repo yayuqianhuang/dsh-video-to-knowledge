@@ -393,7 +393,7 @@ export function apply(ctx) {
     description:
       '视频转知识链的环境自检：检查 Python / yt-dlp / ffmpeg / faster-whisper 是否可用，以及 B 站登录态。' +
       '不会联网抓取内容；B 站登录态只判断 cookie 文件是否存在且含 SESSDATA，不打印任何凭据内容。',
-    inputSchema: {
+    parameters: {
       type: 'object',
       properties: {
         url: { type: 'string', description: '可选：要处理的视频链接，用于判断平台' },
@@ -445,7 +445,7 @@ export function apply(ctx) {
       '准备知识卡素材：抓视频元数据 → 抓字幕（B 站需登录 cookie）→ 清洗切块 → 产出按分 P 的素材包。' +
       '返回每个分 P 的素材文件路径与顺序时间轴，供你（模型）撰写卡片正文。' +
       '完成后调用 vk_run 组装、校验并落盘。',
-    inputSchema: {
+    parameters: {
       type: 'object',
       properties: {
         url: { type: 'string', description: '视频链接（bilibili / youtube）' },
@@ -518,7 +518,7 @@ export function apply(ctx) {
     description:
       '运行完整的 video-to-knowledge 触发链：环境门 → 素材 → 五项质量校验 → 查重 → 落盘 kb/<collection>/ → 计数核验 →（可选）回写大纲。' +
       '需要 cards 目录里已存在卡片正文（先用 vk_prepare 拿素材、由模型写正文）。',
-    inputSchema: {
+    parameters: {
       type: 'object',
       properties: {
         url: { type: 'string' },
@@ -614,7 +614,7 @@ export function apply(ctx) {
     description:
       '查看 / 修改本插件配置。dsh 的图形设置页需要插件自带客户端 bundle，本插件不发布客户端，' +
       '所以配置走这里（写入用户目录下的 config.json）或环境变量。生效优先级：工具入参 > 环境变量 > 配置文件 > 默认。',
-    inputSchema: {
+    parameters: {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['get', 'set', 'unset'], default: 'get' },
@@ -684,7 +684,7 @@ export function apply(ctx) {
     description:
       '运行 AJTC 引擎中的任意一条链（**只有 mock 适配器，agentStep 不会真执行**）。' +
       '适合验证链结构与信号接线；需要真跑的请用 vk_run。',
-    inputSchema: {
+    parameters: {
       type: 'object',
       properties: {
         chainId: { type: 'string' },
@@ -706,7 +706,7 @@ export function apply(ctx) {
   ctx.tools.register({
     name: 'ajtc_list_chains',
     description: '列出 AJTC 引擎中已注册的全部触发链（id / 标题 / 节点数）。',
-    inputSchema: { type: 'object', properties: {}, required: [] },
+    parameters: { type: 'object', properties: {}, required: [] },
     output: textOutput(),
     async execute() {
       const chains = listChains()
@@ -719,7 +719,7 @@ export function apply(ctx) {
   ctx.tools.register({
     name: 'ajtc_recall_memory',
     description: '在 AJTC 策展记忆层（铁律 / 资产登记模板 / 治理台账模板）中按关键词召回片段。',
-    inputSchema: {
+    parameters: {
       type: 'object',
       properties: {
         query: { type: 'string' },

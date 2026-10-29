@@ -54,7 +54,10 @@ mod.apply(ctx);
 
 const EXPECT = ['vk_doctor', 'vk_config', 'vk_prepare', 'vk_run', 'ajtc_run_chain', 'ajtc_list_chains', 'ajtc_recall_memory'];
 for (const n of EXPECT) check(`tool ${n} registered`, tools.has(n), `(got ${[...tools.keys()].join(',')})`);
-check('tools have inputSchema', [...tools.values()].every((t) => t.inputSchema && t.inputSchema.type === 'object'));
+// 宿主读的是 definition.parameters（不是 MCP 的 inputSchema），缺了会在投影时抛
+check('tools have parameters schema',
+  [...tools.values()].every((t) => t.parameters && t.parameters.type === 'object'));
+check('no leftover inputSchema field', [...tools.values()].every((t) => t.inputSchema === undefined));
 // 宿主校验：output.render 必须是函数，output.schema 须落在受支持子集内
 check('every tool declares output {schema, render}',
   [...tools.values()].every((t) => t.output && t.output.schema && typeof t.output.render === 'function'));

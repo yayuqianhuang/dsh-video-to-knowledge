@@ -303,6 +303,7 @@ PowerShell 无 BOM 写法：
 |---|---|---|
 | 激活失败：`cannot get property "tools" without inject` | 入口没声明 Cordis 服务注入 | 在 `index.js` 顶层加 `export const inject = ['tools']`（访问 `ctx.tools` 之前必须声明） |
 | 激活失败：`tool "x" must declare output { schema, render }` | 工具没声明输出契约 | `ctx.tools.register` 里加 `output: { schema, render }`；`render(args, value)` 必须是**函数**且返回 content 数组 |
+| 激活失败：`tool "x" parameters must be lossless JSON before schema projection` | 参数 schema 用了 `inputSchema` 字段名 | 宿主只读 `definition.parameters`；把 `inputSchema:` 改成 `parameters:`（`inputSchema` 是 MCP/Anthropic 约定，dsh 不认） |
 | `未找到 Python` | PATH 里没有可用解释器 | 设 `VK_PYTHON` 指向绝对路径 |
 | `抓字幕失败：...需要登录态` | 该视频 `need_login_subtitle` | 传 `cookiesPath` |
 | `does not look like a Netscape format` | cookie 文件带 BOM / 存成了提示语 | 重新导出，确认首行是 `# Netscape HTTP Cookie File` |
