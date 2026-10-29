@@ -40,6 +40,7 @@ npm pack --dry-run           # 看真实会打进 tarball 的文件清单
 ```
 
 - [ ] **版本号已升**（至少 patch；`package.json` 的 `version`），并打了对应 tag
+- [ ] **Release notes 末尾带 issue 页脚**（`---` + "遇到问题请提 issue…" + 链接），每版必带
 - [ ] `npm test` 通过
 - [ ] `npm pack --dry-run` 清单里无 `__pycache__` / `*.pyc` / `.runtime` / `run-shadow`
       （`prepack` 钩子已自动清理，见 `scripts/clean-pack.mjs`）
@@ -238,7 +239,16 @@ Release 是"更新说明"的载体。**没有 Release，市场里只有版本号
 ### 升级建议
 
 装过的用户请手动「检查更新」或重装一次；旧版本不会自动升级。
+
+---
+
+遇到问题请提 issue（附插件版本 + 报错原文）：
+https://github.com/yayuqianhuang/dsh-video-to-knowledge/issues
 ```
+
+> ⚠️ **页脚是固定的，每个 Release 都必须带**（owner 要求）。
+> 用户看完更新说明，下一步动作通常就是"我这儿出问题了"——把出口放在这里，比让他回 README 里翻更快。
+> 上面模板那三行（`---` + 提示 + 链接）原样复制，别改措辞。
 
 ### 步骤 7 · 分发与验证
 
