@@ -24,6 +24,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-video-to-knowledge'
+export const inject = ['tools']
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ENGINE_DIR = join(HERE, 'engine')
@@ -698,8 +699,11 @@ export function apply(ctx) {
   })
 
   /* ---------- system prompt ---------- */
-  if (ctx.systemPrompt && typeof ctx.systemPrompt.section === 'function') {
-    ctx.systemPrompt.section(() => ({
+  // systemPrompt 不是 Cordis 可注入服务：直接访问属性会抛，故用 try/catch 兜住
+  let sp = null
+  try { sp = ctx.systemPrompt } catch { sp = null }
+  if (sp && typeof sp.section === 'function') {
+    sp.section(() => ({
       role: 'system',
       content:
         '[视频转知识链 · dsh-video-to-knowledge 已挂载]\n' +

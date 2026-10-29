@@ -34,6 +34,11 @@ try {
   check('index.js loads', true);
   check('plugin name', mod.name === 'dsh-video-to-knowledge', `(got ${mod.name})`);
   check('apply() exported', typeof mod.apply === 'function');
+  // Cordis 服务注入：不声明 inject 就访问 ctx.tools 会抛
+  // "cannot get property 'tools' without inject"，插件直接激活失败。
+  check('declares inject including tools',
+    Array.isArray(mod.inject) && mod.inject.includes('tools'),
+    `(got ${JSON.stringify(mod.inject)})`);
 } catch (e) {
   check('index.js loads', false, String(e && e.message));
   console.log('\nSMOKE FAIL'); process.exit(1);
