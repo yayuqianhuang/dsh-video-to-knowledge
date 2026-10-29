@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-to-knowledge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "DeepSeek Harness (dsh) 插件：把「视频链接 → 带时间戳的 Markdown 知识卡 → 落盘 kb/」整条 AJTC 触发链封装成开箱可用工具。含环境自检、素材准备、五项质量校验、查重、落盘、计数核验与大纲回写。",
   "license": "MIT",
