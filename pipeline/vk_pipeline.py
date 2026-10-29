@@ -178,10 +178,18 @@ def parse_srt(path):
 
 
 def p_index_from_name(name):
-    """从文件名前缀取分 P 序号：支持 01_xxx.srt / 01.xxx.srt / card-<vid>-p01.md"""
+    r"""从文件名前缀取分 P 序号：支持 01_xxx.srt / 01.xxx.srt / card-<vid>-p01.md
+
+    单 P 视频有一个坑：yt-dlp 的 %(playlist_index)02d 会渲染成字面量 "NA"，
+    产出 NA_<title>.ai-zh.srt。旧实现只认 ^\d{2}，于是这类文件被丢弃，
+    表现为"字幕明明下载了却报 NO_TRANSCRIPT"。这里把 NA 前缀视为第 1 个 P。
+    """
     m = re.match(r"^(\d{2})[_.\s]", name)
     if m:
         return int(m.group(1))
+    m = re.match(r"^NA[_.\s]", name, re.I)
+    if m:
+        return 1
     m = re.search(r"-p(\d{2})\.md$", name)
     if m:
         return int(m.group(1))
@@ -349,7 +357,8 @@ def _load_or_synth_meta(viddir, vid, durations=None, url=None):
 def _find_srts(viddir):
     """在 viddir 与 viddir/subs 两处找 srt，返回 {pIndex: path}。"""
     found = {}
-    for d in (viddir, os.path.join(viddir, "subs")):
+    # viddir/manual 是给"手动下载 srt"留的兜底位置
+    for d in (viddir, os.path.join(viddir, "subs"), os.path.join(viddir, "manual")):
         if not os.path.isdir(d):
             continue
         for name in sorted(os.listdir(d)):
@@ -361,9 +370,30 @@ def _find_srts(viddir):
             idx = p_index_from_name(name)
             if idx is None:
                 continue
-            if idx in found and "ai-zh" not in name.lower():
-                continue
+            if idx in found:
+                prev = os.path.basename(found[idx])
+                prev_na = prev.upper().startswith("NA")
+                new_na = name.upper().startswith("NA")
+                # 同一索引下：编号名（01_）优先于 NA_ 名
+                if new_na and not prev_na:
+                    continue
+                # 别用非 ai-zh 轨道覆盖已找到的 ai-zh 轨道
+                if "ai-zh" not in name.lower() and "ai-zh" in prev.lower():
+                    continue
             found[idx] = os.path.join(d, name)
+
+    # 兜底：一个索引都没解析出来，但确实存在 srt（如手动的 <videoId>.ai-zh.srt），
+    # 单 P 视频就把它当作 P1
+    if not found:
+        loose = []
+        for d in (viddir, os.path.join(viddir, "subs"), os.path.join(viddir, "manual")):
+            if not os.path.isdir(d):
+                continue
+            for name in sorted(os.listdir(d)):
+                if name.lower().endswith(".srt") and "_pna" not in name.lower():
+                    loose.append(os.path.join(d, name))
+        if len(loose) == 1:
+            found[1] = loose[0]
     return found
 
 
