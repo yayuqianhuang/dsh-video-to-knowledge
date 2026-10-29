@@ -87,6 +87,26 @@ def cmd_meta(a):
     })
 
 
+def _cookie_copy(path):
+    """把 cookie 复制到临时目录再交给 yt-dlp。
+
+    yt-dlp 带 --cookies 时会在退出阶段把 cookiejar **写回原文件**；若该路径只读
+    （沙箱 / 受保护目录），会抛 PermissionError 并以非 0 退出，整条链断在第一步。
+    复制一份既能避免回写用户凭据本体，也能让只读场景正常工作。
+    """
+    if not path:
+        return path
+    try:
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp(prefix="vk-ck-")
+        dst = os.path.join(d, "cookies.txt")
+        shutil.copy2(path, dst)
+        return dst
+    except Exception:
+        return path
+
+
 def _build_meta_from_ytdlp(url, vid, a, require_login=False):
     """取元数据。B 站元数据游客可见，因此默认**不要求**登录；
     只有 require_login=True（如确需连字幕一起抓的路径）才强制 cookie。"""
@@ -102,11 +122,12 @@ def _build_meta_from_ytdlp(url, vid, a, require_login=False):
 
     cmd = [ytdlp, "--no-warnings"]
     if cookies:
-        cmd += ["--cookies", cookies]
+        cmd += ["--cookies", _cookie_copy(cookies)]
     cmd += ["--print", "%(playlist_index)s\t%(duration)s\t%(playlist_title)s\t%(title)s", url]
 
     code, out, err = vp.run_cmd(cmd)
-    if code != 0:
+    # 有产出就不算失败：yt-dlp 可能在收尾阶段因 cookie 回写等非致命原因非 0 退出
+    if code != 0 and not out.strip():
         die(f"yt-dlp 取元数据失败：{(err or out)[-600:]}")
 
     parts = []
@@ -201,7 +222,7 @@ def _fetch_and_convert(url, vid, meta, a):
 
     cmd = [ytdlp, "--no-warnings"]
     if cookies:
-        cmd += ["--cookies", cookies]
+        cmd += ["--cookies", _cookie_copy(cookies)]
     cmd += ["--write-subs", "--write-auto-subs",
             "--sub-langs", a.sub_langs,
             "--skip-download", "--no-overwrites",
@@ -213,7 +234,16 @@ def _fetch_and_convert(url, vid, meta, a):
 
     srts = vp._find_srts(viddir)
     if not srts:
-        die("NO_TRANSCRIPT：没有下载到任何 .srt（cookie 失效 / 无 AI 字幕 / 语言代码不对）", code=3)
+        # 区分"根本没下载"与"下载了但解析不出分 P 序号"，避免误导排查方向
+        loose = []
+        for d in (viddir, os.path.join(viddir, "subs"), os.path.join(viddir, "manual")):
+            if os.path.isdir(d):
+                loose += [n for n in os.listdir(d)
+                          if n.lower().endswith(".srt") and "_pna" not in n.lower()]
+        if loose:
+            die(f"SRT_FOUND_BUT_UNPARSED：已下载 {len(loose)} 个 .srt，但没有一个能解析出分 P 序号"
+                f"（示例：{loose[0]}）。可手动重命名为 01_xxx.srt 后重试，或反馈此文件名格式", code=3)
+        die("NO_TRANSCRIPT：yt-dlp 没有下载到任何 .srt（cookie 失效 / 无 AI 字幕 / 语言代码不对）", code=3)
 
     records, stats = [], []
     for p in sorted(meta.get("parts") or [], key=lambda x: x["index"]):

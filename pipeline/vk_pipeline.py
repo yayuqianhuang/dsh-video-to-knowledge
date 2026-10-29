@@ -90,15 +90,34 @@ def resolve_cleaner(explicit=None):
     return _first_existing(cands)
 
 
+def _decode_out(buf):
+    """子进程字节输出 → str：优先 UTF-8，退到 cp936（zh-CN Windows 默认），最后兜底替换。
+
+    不能只用 `text=True, encoding="utf-8"`：yt-dlp 自身是 Python 脚本，在中文
+    Windows 上默认按 cp936 写 stdout，父进程按 utf-8 解会把中文标题变成 U+FFFD，
+    而且 U+FFFD 不可逆——脏标题会一路写进 meta.json 与卡片 frontmatter。
+    """
+    if not buf:
+        return ""
+    for enc in ("utf-8", "cp936"):
+        try:
+            return buf.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return buf.decode("utf-8", errors="replace")
+
+
 def run_cmd(args, quiet=True):
     """执行外部命令，返回 (code, stdout, stderr)。不打印任何含凭证的内容。"""
-    proc = subprocess.run(
-        args, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-    )
-    if not quiet and proc.stdout:
-        sys.stderr.write(proc.stdout)
-    return proc.returncode, proc.stdout or "", proc.stderr or ""
+    # 强制子进程按 UTF-8 输出（PYTHONUTF8 对 yt-dlp 这类 Python 子进程生效），
+    # 父进程再按 utf-8 → cp936 的顺序解码，两边编码不再错配。
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    proc = subprocess.run(args, capture_output=True, env=env)
+    out = _decode_out(proc.stdout)
+    err = _decode_out(proc.stderr)
+    if not quiet and out:
+        sys.stderr.write(out)
+    return proc.returncode, out, err
 
 # ---------------------------------------------------------------- 小工具
 

@@ -431,8 +431,8 @@ export function apply(ctx) {
       required: [],
     },
     output: textOutput(),
-    async execute({ url = '', workDir, cookiesPath } = {}) {
-      const wd = resolveWorkDir(workDir)
+    async execute({ url = '', outputDir, workDir, cookiesPath } = {}) {
+      const wd = resolveWorkDir(outputDir || workDir)
       const ck = resolveCookies(cookiesPath).path
       const py = await detectPython()
       const args = ['doctor']
@@ -485,8 +485,10 @@ export function apply(ctx) {
       required: ['url'],
     },
     output: textOutput(),
-    async execute({ url, workDir, cookiesPath, lang = 'zh-CN', refresh = false } = {}) {
-      const wd = resolveWorkDir(workDir)
+    async execute({ url, outputDir, workDir, cookiesPath, lang = 'zh-CN', refresh = false } = {}) {
+      // schema 同时声明了 outputDir 与兼容别名 workDir；此前只解构 workDir，
+      // 导致按文档传 outputDir 时被静默忽略、产物落到配置文件/工作区的目录。
+      const wd = resolveWorkDir(outputDir || workDir)
       const ck = resolveCookies(cookiesPath).path
 
       const meta = await runPy('vk_chain.py', ['meta', '--url', url, ...(refresh ? ['--refresh'] : [])],
