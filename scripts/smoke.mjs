@@ -91,6 +91,22 @@ for (const f of [
   'engine/chains/video-to-knowledge/gen.video-to-knowledge.json',
 ]) check(`file ${f}`, existsSync(join(ROOT, f)));
 
+/* 3b. 回归断言（来自真实反馈：这三处一旦被改回去，用户侧会静默坏掉） */
+const idxSrc = readFileSync(join(ROOT, 'index.js'), 'utf8');
+const pipeSrc = readFileSync(join(ROOT, 'pipeline', 'vk_pipeline.py'), 'utf8');
+const chainSrc = readFileSync(join(ROOT, 'pipeline', 'vk_chain.py'), 'utf8');
+
+// P2：vk_prepare 必须解构 outputDir，否则入参被静默丢弃（schema 里声明了却不用）
+check('vk_prepare destructures outputDir',
+  /async execute\(\{\s*url,\s*outputDir/.test(idxSrc));
+// P3：中文 Windows 下子进程按 cp936 输出，父进程必须强制 UTF-8 + 有 cp936 兜底
+check('run_cmd forces UTF-8 for child process', pipeSrc.includes('PYTHONUTF8'));
+check('run_cmd falls back to cp936', pipeSrc.includes('cp936'));
+// P4：--cookies 会被 yt-dlp 回写；只读路径会 PermissionError，必须复制到临时目录
+check('cookie copied before yt-dlp', chainSrc.includes('_cookie_copy'));
+// P1：报错必须能区分"下载了但解析不出序号"
+check('NO_TRANSCRIPT split from unparsed', chainSrc.includes('SRT_FOUND_BUT_UNPARSED'));
+
 /* 4. 链已参数化（分发关键：不能残留绝对路径） */
 const chainPath = join(ROOT, 'engine', 'chains', 'video-to-knowledge', 'gen.video-to-knowledge.json');
 const chain = JSON.parse(readFileSync(chainPath, 'utf8'));
