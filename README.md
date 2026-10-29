@@ -405,11 +405,19 @@ https://github.com/yayuqianhuang/dsh-video-to-knowledge/issues
 ## 开发
 
 ```bash
-npm test          # = node scripts/smoke.mjs（26 项断言，不联网）
+npm test          # = node scripts/smoke.mjs（44 项断言，不联网）
 node scripts/e2e-tools.mjs <workDir> <kbPath>   # 直接调工具做端到端验证
 ```
 
 发布步骤见 [PUBLISH.md](PUBLISH.md)。
+
+## 联系我
+
+- **QQ**：3080203138
+- **邮箱**：1513229874@qq.com
+
+插件用着有问题，**优先走 [Issues](https://github.com/yayuqianhuang/dsh-video-to-knowledge/issues)** —— 这样别人也能搜到答案，也方便我按版本跟进。
+商务合作、或者不方便公开说的事，再直接找我。
 
 ## License
 
