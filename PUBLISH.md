@@ -130,50 +130,173 @@ npm publish --access public
 
 ---
 
-## 版本与发布（市场只认"正式版本"）
+## 版本与发布（完整流程）
 
-**现象**：推了新提交，但市场提示：
+一句话：**改代码 → 测试 → 升版本 → 提交 → 打 tag → 推 → GitHub Release → 分发**。
+前 5 步在命令行，第 6 步在网页，第 7 步是通知用户。
 
-> 所选分支上有比你已装版本更新的提交，但没有发布新版本号；市场只安装正式版本，不会自动装这些提交。
+> 为什么必须走完：市场按**版本号**判断有没有更新。只 push 提交而不升 `version`，市场认为你已是最新，
+> 连推 4 个修复提交都等于白改（这是真实踩过的坑，见开头的「铁律」）。
 
-**原因**：市场按**版本号**判断有没有更新。只 push 提交而不改 `package.json` 的 `version`，
-市场就认为你已经是最新；即使分支上有更新的提交也不会装。
-
-**发布一个版本的完整动作**：
+### 步骤 0 · 确认起点干净
 
 ```bash
-# 0) 确认工作区干净
-git status
+cd /d/Users/24485/Desktop/BountyHunter/dsh-video-to-knowledge
+git status                       # 期望：nothing to commit, working tree clean
+npm test                         # 期望：SMOKE PASS（44 项）
+node -e "console.log(require('./package.json').version)"   # 记下当前版本
+```
 
-# 1) 升版本（语义化：修 bug = patch，新功能 = minor，破坏性变更 = major/minor）
-#    直接改 package.json 里的 "version"
+### 步骤 1 · 改代码（这一步不碰版本号）
 
-# 2) 提交
+改完跑一遍 `npm test`。**测试不过就不要往下走**——发出去的版本收不回来。
+
+### 步骤 2 · 升版本（决定 patch / minor）
+
+| 改了什么 | 升哪一位 | 例子 |
+|---|---|---|
+| 修 bug、改文案、加/改测试断言 | **patch** | `0.1.4 → 0.1.5` |
+| 加工具、加能力、加可选参数（向后兼容） | **minor** | `0.1.5 → 0.2.0` |
+| 改参数名、删工具、改默认行为（不兼容） | **minor 或 major** | `0.2.0 → 0.3.0` |
+
+只改**仓库**的 `package.json`（其余副本用同步脚本处理，别手改四份）。
+
+```bash
+# 用 node 改，比手编辑不容易漏引号
+node -e "const fs=require('fs');const j=JSON.parse(fs.readFileSync('package.json','utf8'));j.version='0.1.6';fs.writeFileSync('package.json',JSON.stringify(j,null,2)+'\n')"
+```
+
+### 步骤 3 · 提交
+
+```bash
 git add -A
-git commit -m "chore(release): v0.1.1"
-
-# 3) 打 annotated tag
-git tag -a v0.1.1 -m "dsh-video-to-knowledge v0.1.1"
-
-# 4) 推提交与 tag（注意 --follow-tags）
-git push origin main --follow-tags
-
-# 5) 网页上建 Release：选刚推的 tag，贴 release notes
+git commit -m "chore(release): v0.1.6"
 ```
 
-> ⚠️ `git push` **默认不推 tag**。不写 `--follow-tags`（或单独 `git push origin v0.1.1`），
-> tag 就只在本地，市场侧看不到"新版本"。
-
-**验证**：
+如果版本号是和功能一起改的，也可以合成一个提交：
 
 ```bash
-git ls-remote --tags origin     # 远端应出现 refs/tags/v0.1.1
+git commit -m "fix(transcript): 单 P 视频字幕被丢弃
+
+- p_index_from_name 支持 NA_ 前缀
+- 回归断言：单 P 视频 transcript 后 segmentCount > 0
+
+版本 0.1.4 -> 0.1.5"
 ```
 
-市场里点「检查更新」应出现新版本号。**已安装的旧版本不会自动升级**，需要手动更新或重装一次。
+### 步骤 4 · 打 tag（annotated，不是轻量 tag）
 
-**版本号放在哪**：只放 `package.json` 的 `version`。`cordis.patch.yml` 不写版本；
-README 里的"当前版本"是给人看的，可随手同步。
+```bash
+git tag -a v0.1.6 -m "dsh-video-to-knowledge v0.1.6"
+```
+
+> 必须 `-a`（annotated）。轻量 tag 在某些工具链里拿不到日期/作者。
+
+### 步骤 5 · 推送（必须带 `--follow-tags`）
+
+```bash
+git push origin main --follow-tags
+```
+
+**验证**（这一步别省，它决定市场能不能看见）：
+
+```bash
+git ls-remote --tags origin | grep v0.1.6
+# 期望两行：refs/tags/v0.1.6 与 refs/tags/v0.1.6^{}（后者是它指向的提交）
+```
+
+### 步骤 6 · 建 GitHub Release（网页，6 小步）
+
+Release 是"更新说明"的载体。**没有 Release，市场里只有版本号、没有说明。**
+
+1. 打开（`?tag=` 会帮你预选，避免手滑选错 tag）：
+   `https://github.com/yayuqianhuang/dsh-video-to-knowledge/releases/new?tag=v0.1.6`
+2. 确认顶部 **Choose a tag** 下拉已是 `v0.1.6`（空就从列表里选；列表里没有 = 第 5 步没成功）
+3. **Release title**：`v0.1.6`
+4. **Describe this release**：粘 release notes（见下方模板）
+5. 勾选 **Set as the latest release**
+6. 点 **Publish release**
+
+**不要碰的三样**：`Create new tag on publish`（tag 已有）、`Attach binaries`（插件不带附件）、
+`Set as a pre-release`（正式版别勾）。
+
+发布成功的标志：地址变成 `/releases/tag/v0.1.6`，且 `/releases` 页面上该条带 **Latest** 标签。
+
+**release notes 模板**（直接改）：
+
+```markdown
+## v0.1.6
+
+### 修复
+
+- 一句话说清症状 + 根因（例：单 P 视频 `playlist_index` 渲染为 NA，导致字幕被丢弃）
+
+### 新增
+
+- 新工具 / 新能力
+
+### 升级建议
+
+装过的用户请手动「检查更新」或重装一次；旧版本不会自动升级。
+```
+
+### 步骤 7 · 分发与验证
+
+| 渠道 | 动作 |
+|---|---|
+| 插件市场 / `dsh plugin add` | 用户侧「检查更新」或重装；**旧版本不会自动升级** |
+| 市场列表收录 | 首次需向 `awesome-dsh-plugin` 提 PR（见 §8），之后随版本自动反映 |
+| npm（可选） | `npm publish --access public`，非必需 |
+
+用户侧验收三条：
+
+```bash
+dsh plugin --profile web list | grep video-to-knowledge      # 版本号已变
+npm test                                                     # 插件仓库里仍是 44 项通过
+# 会话里说「我要 B 站登录」→ 应触发 vk_login
+```
+
+---
+
+## 常见故障与修法
+
+| 现象 | 原因 | 修法 |
+|---|---|---|
+| 市场提示"没有发布新版本号" | 只 push 提交、没升 `version` | 回到步骤 2 |
+| 远端看不到 tag | `git push` 没带 `--follow-tags` | `git push origin v0.1.6` |
+| tag 指到了旧提交 | 推送与重建 tag 撞车 | `git push origin refs/tags/v0.1.6 --force` |
+| Release 选错了 tag | 手滑 | 编辑 Release 改 tag，或删了重建 |
+| Release 建了但市场没说明 | 没勾 latest / 建成了 pre-release | 编辑 Release 修正 |
+| 四个副本版本不一致 | 手改了多份 `package.json` | 以仓库为准，跑同步脚本 |
+
+## 回滚一个坏版本
+
+**优先"发新版本修"**，不要动已发布的 tag——用户可能已经装了。
+
+```bash
+# 推荐：0.1.6 有 bug → 修完发 0.1.7
+```
+
+如果刚发出去、确认没人装，可以撤：
+
+```bash
+git tag -d v0.1.6                    # 删本地 tag
+git push origin :refs/tags/v0.1.6    # 删远端 tag
+# 再去网页删掉对应 Release
+```
+
+## 一页速查
+
+```bash
+V=0.1.6
+# 1. 改 package.json 的 version -> $V
+npm test                                                    # 必须 SMOKE PASS
+git add -A && git commit -m "chore(release): v$V"
+git tag -a v$V -m "v$V"
+git push origin main --follow-tags
+git ls-remote --tags origin | grep "v$V"                    # 两行才算成功
+# 2. 网页：/releases/new?tag=v$V → 标题 → 粘 notes → 勾 latest → Publish
+```
 
 ## 已知限制
 
