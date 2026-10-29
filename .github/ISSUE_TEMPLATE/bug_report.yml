@@ -1,0 +1,65 @@
+name: 问题反馈
+description: 装不上、跑不通、结果不对 —— 请按下面几项填，能省掉一轮来回
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！下面几项填全的话，大多数问题不用再来回问就能定位。
+        如果是"某种视频抓不到字幕"，请先确认**它有没有字幕轨**（硬字幕烧在画面里的抓不到）。
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      description: 运行 `dsh plugin --profile web list | grep video-to-knowledge`
+      placeholder: dsh-video-to-knowledge@0.1.5
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: dsh 版本 / 系统 / Python
+      placeholder: dsh 0.1.1-rc.2 · Windows 11 · Python 3.12
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 你在会话里说了什么、给了哪个链接（视频链接请保留完整 BV 号）
+      placeholder: |
+        1. 说「把这个视频沉淀成知识卡：https://www.bilibili.com/video/BVxxxx」
+        2. 出现报错……
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: 完整报错原文（不要截断）
+      description: 工具返回的那一整段，尤其带上 ERROR / Traceback 后面的内容
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: vk_doctor 输出
+      description: 在会话里说「先自检环境，缺什么告诉我」，把返回整段贴进来
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: selfcheck
+    attributes:
+      label: 自查（勾选已确认的项）
+      options:
+        - label: 已重启 dsh（插件只在启动时加载，改完不重启不生效）
+        - label: 已确认该视频没有"字幕轨"问题（有 ai-zh 字幕才算有）
+        - label: 已确认插件不是从旧版本装的（`dsh plugin list` 版本号与仓库 Release 一致）

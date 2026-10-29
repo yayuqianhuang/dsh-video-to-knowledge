@@ -364,6 +364,30 @@ PowerShell 无 BOM 写法：
 
 > 不要用 `--cookies-from-browser`：Windows 上实测会 `Failed to decrypt with DPAPI`。
 
+## 遇到问题？
+
+**先做这三件事**（80% 的问题在这一步就解决了）：
+
+1. **重启 dsh** —— 插件只在启动时加载，改完不重启一定不生效
+2. **在会话里说「先自检环境，缺什么告诉我」** —— 会跑 `vk_doctor`，多数环境问题它能直接指出来
+3. **看下面的排错表** —— 已知问题的症状都列在那里
+
+**还是不行？提 issue 最快**：
+https://github.com/yayuqianhuang/dsh-video-to-knowledge/issues
+
+提的时候请带上这四项，否则大概率只能来回问：
+
+| 要带什么 | 怎么拿 |
+|---|---|
+| 插件版本 | `dsh plugin --profile web list \| grep video-to-knowledge` |
+| 完整报错原文 | 工具返回的那一整段（别截断，尤其 `ERROR` / `Traceback` 后面） |
+| `vk_doctor` 输出 | 会话里说「先自检环境」 |
+| 最后那次请求 | 你说了什么、给了哪个链接（保留完整 BV 号） |
+
+> 两个高频"不是 bug"的情况，先说清楚省得白提：
+> - **视频本身没有字幕轨**（"俄语中字""中字"这类把字幕烧进画面的），抓不到是正常的——链路需要文本源
+> - **装了旧版本**：`dsh plugin list` 里的版本号必须与仓库最新 Release 一致，否则你跑的是老代码
+
 ## 排错
 
 | 现象 | 原因 | 处理 |
