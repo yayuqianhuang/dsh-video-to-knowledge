@@ -112,6 +112,53 @@ npm publish --access public
 
 ---
 
+---
+
+## 版本与发布（市场只认"正式版本"）
+
+**现象**：推了新提交，但市场提示：
+
+> 所选分支上有比你已装版本更新的提交，但没有发布新版本号；市场只安装正式版本，不会自动装这些提交。
+
+**原因**：市场按**版本号**判断有没有更新。只 push 提交而不改 `package.json` 的 `version`，
+市场就认为你已经是最新；即使分支上有更新的提交也不会装。
+
+**发布一个版本的完整动作**：
+
+```bash
+# 0) 确认工作区干净
+git status
+
+# 1) 升版本（语义化：修 bug = patch，新功能 = minor，破坏性变更 = major/minor）
+#    直接改 package.json 里的 "version"
+
+# 2) 提交
+git add -A
+git commit -m "chore(release): v0.1.1"
+
+# 3) 打 annotated tag
+git tag -a v0.1.1 -m "dsh-video-to-knowledge v0.1.1"
+
+# 4) 推提交与 tag（注意 --follow-tags）
+git push origin main --follow-tags
+
+# 5) 网页上建 Release：选刚推的 tag，贴 release notes
+```
+
+> ⚠️ `git push` **默认不推 tag**。不写 `--follow-tags`（或单独 `git push origin v0.1.1`），
+> tag 就只在本地，市场侧看不到"新版本"。
+
+**验证**：
+
+```bash
+git ls-remote --tags origin     # 远端应出现 refs/tags/v0.1.1
+```
+
+市场里点「检查更新」应出现新版本号。**已安装的旧版本不会自动升级**，需要手动更新或重装一次。
+
+**版本号放在哪**：只放 `package.json` 的 `version`。`cordis.patch.yml` 不写版本；
+README 里的"当前版本"是给人看的，可随手同步。
+
 ## 已知限制
 
 1. **必须自备 Python 3.10+ 与 yt-dlp**；插件不打包运行时。
