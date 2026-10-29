@@ -52,7 +52,7 @@ const ctx = {
 };
 mod.apply(ctx);
 
-const EXPECT = ['vk_doctor', 'vk_config', 'vk_prepare', 'vk_run', 'ajtc_run_chain', 'ajtc_list_chains', 'ajtc_recall_memory'];
+const EXPECT = ['vk_doctor', 'vk_login', 'vk_config', 'vk_prepare', 'vk_run', 'ajtc_run_chain', 'ajtc_list_chains', 'ajtc_recall_memory'];
 for (const n of EXPECT) check(`tool ${n} registered`, tools.has(n), `(got ${[...tools.keys()].join(',')})`);
 // 宿主读的是 definition.parameters（不是 MCP 的 inputSchema），缺了会在投影时抛
 check('tools have parameters schema',

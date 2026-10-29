@@ -109,17 +109,54 @@ dsh plugin --profile web list          # 应能看到 dsh-video-to-knowledge
 
 返回链的执行报告：卡片数、`quality.ok`、查重命中、`verify` 计数、大纲回写节数。
 
-## 四个工具
+## 五个工具
 
 | 工具 | 作用 | 会联网 |
 |---|---|---|
 | `vk_doctor` | 环境自检（含 B 站登录态） | 否 |
+| `vk_login` | **登录引导**：登记 cookie 路径 / 自动发现 / 给操作说明 | 否 |
 | `vk_config` | 查看 / 修改配置（见下节） | 否 |
 | `vk_prepare` | 元数据 + 字幕 + 清洗切块 + 素材包 | 是（有缓存则复用） |
 | `vk_run` | 跑完整链：校验 → 查重 → 落盘 → 核验 → 大纲 | 仅在需要重抓字幕时 |
 
 另保留原 AJTC 能力：`ajtc_list_chains` / `ajtc_run_chain`（**仅 mock**）/ `ajtc_recall_memory`。
 
+## 首次使用：怎么"登录" B 站
+
+本插件**没有图形设置页**（原因见下节），所以登录不是填表单，而是**放一个文件 + 登记路径**。
+
+### 三步
+
+1. **在浏览器登录 B 站**（建议用小号，cookie 等同账号密码）
+2. **导出 Netscape 格式的 cookie 文件**，放到下面任一路径（放好即可被自动发现）：
+   - `~/.dsh-video-to-knowledge/bili-cookies.txt`
+   - `~/.workbuddy/secrets/bili-cookies.txt`
+   - 当前工作目录下的 `bili-cookies.txt`
+3. **调用 `vk_login`**：就绪会写进配置；没就绪会返回逐步说明
+
+也可以直接把路径告诉它：
+
+```jsonc
+{ "cookiesPath": "D:/某处/bili-cookies.txt" }
+```
+
+### 导出方式（任选其一）
+
+- 浏览器扩展 **Get cookies.txt LOCALLY** → 选中 `bilibili.com` → Export
+- DevTools → Network → 任一 bilibili 请求 → 右键 Copy as cURL → 转 Netscape 格式
+
+### 三个已知坑
+
+| 现象 | 原因 |
+|---|---|
+| `does not look like a Netscape format cookies file` | 文件带 **BOM**（PowerShell `>` 重定向会产生 BOM） |
+| 文件只有几十字节、内容是一句"复制成功" | 用了会弹提示的扩展，存下的是提示文字而不是 cookie |
+| `ERROR: Failed to decrypt with DPAPI` | 用了 `--cookies-from-browser chrome`；Chrome 新版加密解不开，改用导出文件 |
+
+### 安全边界
+
+`vk_login` 只做**存在性判断**：文件在不在、里面有没有 `SESSDATA` 字样。
+**不读取内容、不打印、不写日志、不进模型上下文**。它登记的是"路径"，不是凭据本身。
 ## 配置（为什么没有图形设置页）
 
 ### 结论先说
@@ -219,7 +256,7 @@ outputDir    D:\tmp\myout                                                 [file]
 
 ```
 .
-├── index.js                 # 插件入口：注册 7 个工具 + system prompt 能力段
+├── index.js                 # 插件入口：注册 8 个工具 + system prompt 能力段
 ├── cordis.patch.yml         # dsh bundle patch（插入 profile layer 栈）
 ├── runner/exec-chain.mjs    # 真执行器：把链节点的 exec 规格跑起来
 ├── pipeline/                # 确定性内核（Python，0 token）

@@ -147,6 +147,28 @@ const CONFIG_KEYS = {
   },
 }
 
+/** B 站 cookie 候选位置：用户按任意一种放好即可被自动发现（无需设置页） */
+const COOKIE_CANDIDATES = [
+  join(CONFIG_DIR, 'bili-cookies.txt'),
+  join(CONFIG_DIR, 'cookies.txt'),
+  join(homedir(), '.workbuddy', 'secrets', 'bili-cookies.txt'),
+  join(process.cwd(), 'bili-cookies.txt'),
+]
+
+/** 解析 cookie 路径：显式入参 > env > 配置文件 > 约定候选（自动发现） */
+function resolveCookies(explicit) {
+  const picked = cfg('cookiesPath', explicit)
+  if (picked) {
+    const src = (explicit !== undefined && explicit !== null && explicit !== '')
+      ? 'arg' : (process.env.BILI_COOKIES ? 'env' : 'file')
+    return { path: picked, source: src }
+  }
+  for (const p of COOKIE_CANDIDATES) {
+    try { if (existsSync(p)) return { path: p, source: 'auto' } } catch { /* ignore */ }
+  }
+  return { path: '', source: 'none' }
+}
+
 function readConfigFile() {
   try { return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) } catch { return {} }
 }
@@ -411,7 +433,7 @@ export function apply(ctx) {
     output: textOutput(),
     async execute({ url = '', workDir, cookiesPath } = {}) {
       const wd = resolveWorkDir(workDir)
-      const ck = cfg('cookiesPath', cookiesPath)
+      const ck = resolveCookies(cookiesPath).path
       const py = await detectPython()
       const args = ['doctor']
       if (url) args.push('--url', url)
@@ -465,7 +487,7 @@ export function apply(ctx) {
     output: textOutput(),
     async execute({ url, workDir, cookiesPath, lang = 'zh-CN', refresh = false } = {}) {
       const wd = resolveWorkDir(workDir)
-      const ck = cfg('cookiesPath', cookiesPath)
+      const ck = resolveCookies(cookiesPath).path
 
       const meta = await runPy('vk_chain.py', ['meta', '--url', url, ...(refresh ? ['--refresh'] : [])],
         { workDir: wd, cookiesPath: ck })
@@ -546,7 +568,7 @@ export function apply(ctx) {
       const od = resolveOutputDir(outputDir || workDir)
       const wd = od.dir
       const cKb = kbPath || join(wd, 'kb')
-      const cCookies = cfg('cookiesPath', cookiesPath)
+      const cCookies = resolveCookies(cookiesPath).path
       const inputPath = join(wd, '.vk-input.json')
       writeFileSync(inputPath, j({
         url,
@@ -610,6 +632,96 @@ export function apply(ctx) {
         (report.skippedNodes?.length ? `· 模型步骤跳过：${report.skippedNodes.join(', ')}\n` : '') +
         `\n${j(report)}`,
       )
+    },
+  })
+
+  /* ---------- 3.4) 登录（无设置页时的引导式配置） ---------- */
+  ctx.tools.register({
+    name: 'vk_login',
+    description:
+      'B 站登录态引导。本插件没有图形设置页，登录 = 你导出 cookie 文件，这里登记路径。' +
+      '只判断文件是否存在、是否含 SESSDATA 字样（绝不读取内容、不打印、不落盘），' +
+      '就绪则写入配置；未就绪则返回逐步操作说明。',
+    parameters: {
+      type: 'object',
+      properties: {
+        cookiesPath: { type: 'string', description: 'B 站 cookie 文件路径（Netscape 格式）。给了就当场校验并保存' },
+        probe: { type: 'boolean', default: true, description: 'true = 顺带检查候选路径，能自动发现就直接用' },
+      },
+      required: [],
+    },
+    output: textOutput(),
+    async execute({ cookiesPath, probe = true } = {}) {
+      const inspect = (p) => {
+        const r = { path: p, exists: false, hasSessdata: false, netscapeHeader: false, bom: false, size: 0 }
+        try {
+          if (!p || !existsSync(p)) return r
+          r.exists = true
+          r.size = statSync(p).size
+          const buf = readFileSync(p)
+          r.bom = buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf
+          const head = buf.subarray(0, 4096).toString('utf8')
+          r.netscapeHeader = /Netscape HTTP Cookie File/.test(head)
+          r.hasSessdata = buf.includes(Buffer.from('SESSDATA'))   // 仅存在性判断
+        } catch { /* ignore */ }
+        return r
+      }
+
+      const judge = (r) => {
+        const bad = []
+        if (!r.exists) bad.push('文件不存在')
+        else {
+          if (r.bom) bad.push('文件带 BOM（yt-dlp 会报 does not look like a Netscape format）')
+          if (!r.hasSessdata) bad.push('文件里没有 SESSDATA（多半不是登录态导出，或导出成了提示文字）')
+        }
+        return bad
+      }
+
+      const guide = (target) =>
+        'B 站登录还没就绪。这个插件没有设置页，登录就两步：\n\n' +
+        '① 在浏览器里登录 B 站（用你打算给插件用的小号）\n' +
+        '② 导出 Netscape 格式的 cookie 文件，放到下面任意一个位置：\n' +
+        COOKIE_CANDIDATES.map((p, i) => `   ${i + 1}) ${p}`).join('\n') + '\n\n' +
+        `推荐：${target}\n\n` +
+        '导出方式（任选其一）：\n' +
+        '· 浏览器扩展「Get cookies.txt LOCALLY」→ 选中 bilibili.com → Export（不要用会弹"复制成功"提示的那种）\n' +
+        '· DevTools → Network → 任一 bilibili 请求 → 右键 Copy as cURL，再用工具转 Netscape\n\n' +
+        '放好后再调一次 vk_login 即可。也可以直接把路径告诉我：\n' +
+        '  vk_login { cookiesPath: "D:/某处/bili-cookies.txt" }\n\n' +
+        '注意：不要用 yt-dlp --cookies-from-browser chrome，Chrome 新版加密会导致 ' +
+        'ERROR: Failed to decrypt with DPAPI。'
+
+      // 1) 显式给了路径：校验并保存
+      if (cookiesPath) {
+        const r = inspect(cookiesPath)
+        const bad = judge(r)
+        if (bad.length === 0) {
+          const f = readConfigFile()
+          f.cookiesPath = cookiesPath
+          writeConfigFile(f)
+          return textResult(`登录态已登记 ✔\n\n路径：${cookiesPath}（${r.size} 字节）\n` +
+            `检查：存在 ✔ / 含 SESSDATA ✔${r.netscapeHeader ? ' / Netscape 头 ✔' : ''}\n\n` +
+            '已写入配置文件，之后 vk_prepare / vk_run 会自动使用。')
+        }
+        return textResult(`这个文件不能用：\n${bad.map((x) => '· ' + x).join('\n')}\n\n` + guide(COOKIE_CANDIDATES[0]))
+      }
+
+      // 2) 没给路径：先自动发现
+      if (probe) {
+        for (const p of COOKIE_CANDIDATES) {
+          const r = inspect(p)
+          if (r.exists && r.hasSessdata && !r.bom) {
+            const f = readConfigFile()
+            f.cookiesPath = p
+            writeConfigFile(f)
+            return textResult(`自动发现并已登记 ✔\n\n路径：${p}（${r.size} 字节）\n` +
+              '之后 vk_prepare / vk_run 会自动使用，无需再传参数。')
+          }
+        }
+      }
+
+      // 3) 都没有：给操作说明
+      return textResult(guide(COOKIE_CANDIDATES[0]))
     },
   })
 
@@ -750,6 +862,7 @@ export function apply(ctx) {
         '可以把视频链接编译成带时间戳、可回跳的 Markdown 知识卡并落盘到 kb/。\n' +
         '标准流程：\n' +
         '• vk_doctor  —— 先自检（Python / yt-dlp / B 站登录态）。缺依赖时不要硬跑。\n' +
+        '• vk_login   —— B 站登录引导：放好 cookie 文件后调用它登记路径（本插件无图形设置页）。\n' +
         '• vk_config  —— 查看/设置 workDir、kbPath、cookiesPath 等（本插件无图形设置页）。\n' +
         '• vk_prepare —— 抓元数据 + 字幕 + 清洗切块，返回按分 P 的素材包。\n' +
         '• （模型自己）读素材，写卡片正文到 <workDir>/cards/card-<videoId>-pNN.md，不要写 frontmatter。\n' +
