@@ -500,6 +500,7 @@ export function apply(ctx) {
       if (!tr.ok) {
         return textResult(
           `抓字幕失败：${tr.error}\n\n` +
+          `→ 先调 vk_login：它会检查/登记 B 站 cookie（本插件没有图形设置页，登录靠它）。\n\n` +
           `常见原因：\n` +
           `· 该视频 need_login_subtitle=true，必须提供 cookiesPath（B 站登录 cookie）\n` +
           `· cookie 已过期 → 重新导出\n` +
@@ -519,13 +520,24 @@ export function apply(ctx) {
           .map((f) => ({ part: Number(f.slice(1, 3)), file: join(byp, f) }))
       } catch { /* 目录可能不存在 */ }
 
+      // 时长/段数从 manifest.json 取（transcript.json 的字段名与这里不一致，曾导致 NaN）
+      let mf = null
+      try { mf = JSON.parse(readFileSync(join(wd, 'runs', videoId, 'manifest.json'), 'utf8')) } catch { mf = null }
+      const totalSec = mf && Array.isArray(mf.parts) && mf.parts.length
+        ? mf.parts.reduce((acc, x) => acc + (x.durationSec || 0), 0)
+        : (tr.data.durationSec || 0)
+      const segCount = mf && mf.clean ? mf.clean.segmentCount : (tr.data.segmentCount || 0)
+      const partCount = mf && Array.isArray(mf.parts) && mf.parts.length
+        ? mf.parts.length : (tr.data.partCount || materials.length)
+
       return textResult(j({
         videoId,
         title: meta.data.title,
-        durationSec: tr.data.durationSec,
-        segmentCount: tr.data.segmentCount,
+        durationSec: Math.round(totalSec),
+        durationMin: Math.round(totalSec / 60),
+        segmentCount: segCount,
         coveredSec: tr.data.coveredSec,
-        parts: tr.data.partCount,
+        parts: partCount,
         workDir: wd,
         materialDir: byp,
         materials,
