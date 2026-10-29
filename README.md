@@ -298,9 +298,10 @@ AJTC 引擎自带的 `agentStep` 只是「**代理检查点**」：它把动作�
 
 ```
 <工作区>/videoToKnowledge/
-├── kb/<collection>/     ← 成品的知识卡 + 索引
+├── kb/<collection>/     ← 成品的知识卡 + 索引（插件落盘）
 ├── runs/<videoId>/      ← 中间产物（meta / transcript / clean / card.json / by_p）
-└── cards/               ← 模型写的卡片正文（synthesize 的输入）
+├── cards/               ← 模型写的卡片正文（synthesize 的输入）
+└── reports/             ← 模型生成的分析报告 / 笔记（不散落在工作区根目录）
 ```
 
 默认落在一个专属子目录里，是为了**不和工作区里已有的 `kb/`、`runs/` 混在一起**。

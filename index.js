@@ -879,6 +879,8 @@ export function apply(ctx) {
         '• vk_prepare —— 抓元数据 + 字幕 + 清洗切块，返回按分 P 的素材包。\n' +
         '• （模型自己）读素材，写卡片正文到 <workDir>/cards/card-<videoId>-pNN.md，不要写 frontmatter。\n' +
         '• vk_run     —— 组装 + 五项质量校验 + 查重 + 落盘 + 核验（+ 可选回写大纲）。\n' +
+        '产出位置：插件产物在 <outputDir>/{kb,runs,cards}/；你生成的分析报告/笔记统一写到\n' +
+        '  <outputDir>/reports/，不要散落在工作区根目录。\n' +
         '硬约束：卡片里的每个 [mm:ss] 必须来自素材中真实出现过的时间戳；不得编造。\n' +
         'B 站部分视频 need_login_subtitle=true，必须由用户提供 cookie 文件路径；绝不读取或记录其内容。\n' +
         '另保留原 AJTC 能力：ajtc_list_chains / ajtc_run_chain（mock）/ ajtc_recall_memory。',
