@@ -1,0 +1,142 @@
+{
+  "id": "gen.chain-extend",
+  "title": "链扩展器（元链：给已有链插入节点）",
+  "version": "0.2.0",
+  "tier": "utility",
+  "skills": [
+    "ajtc-chain-gen"
+  ],
+  "intent": "给定一个扩展 spec（目标链 + 新节点 + 可选 trigger 改写 / mock 分支 / 版本号），确定性地把节点插入目标链，并以内联 lint 闸门校验后才写盘。本链是开发期工具，非对外交付链。v0.2 起支持 spec.nodes（批量插入）与 spec.autoCodeNodes（或按目标链 intent 命中代码关键词）自动注入代码治理锚点节点（codeOptimize/bugFix/docGen，定义见 codeAnchor.template），用于实现《Agent 提示词优化理论课》作业1c「代码强相关触发链自动含对应节点」。",
+  "principle": [
+    "每次操作必须可被逐步复盘：可先用 dryRun:true 预演，再实际写盘。",
+    "绝不删除任何文件；插入前内联 lint，errors>0 默认不写（除非 force）。",
+    "幂等：同 id 已存在则中止并告警，不静默覆盖。",
+    "mock 分支追加带重复守卫，重复运行不会写脏。",
+    "写盘范围严格限定在 spec 显式指定的目标链文件与（可选）mock.js 对应角色分支。",
+    "代码锚点自动注入（作业1c）：若 spec.autoCodeNodes===true 或目标链 intent/title 命中 codeAnchor.template.detectionKeywords，则自动追加 codeOptimize/bugFix/docGen 三节点；已存在同 id 则跳过（幂等）；首锚点接驳目标链末非-halt 节点的 .done/.end 信号，bugFix/docGen 顺序接驳 code.optimize.done / code.debug.done。"
+  ],
+  "acceptance": [
+    "目标链节点数 +1（或按 rewire 改写下游触发而不增节点）。",
+    "写盘后 lint errors===0、orphans===0。",
+    "若 dryRun:true，则只产出计划、不改动任何文件。",
+    "若目标链已存在同 id 节点且 reinsert 未置真，则中止且不写盘。",
+    "verify 闸门对 $.extend.ok 为 false 的情况放行到 deliver 但仍带 issues 标记。",
+    "若目标链 intent 命中代码关键词（或 autoCodeNodes===true）且未含 codeOptimize/bugFix/docGen，则插入后该链须含此三节点（$.extend.codeAnchor.injected 非空）。",
+    "代码锚点注入保持幂等：目标链已含 codeOptimize 等节点时跳过，不重复写（$.extend.skippedNodeIds 含之）。"
+  ],
+  "redlines": [
+    "禁止在 spec 之外改写目标链其它节点",
+    "禁止删除文件",
+    "禁止把 mock 分支写进非 business-analyst 的角色 switch"
+  ],
+  "boundaries": {
+    "scope": "仅修改用户显式指定的目标链与（可选）mock.js 对应角色分支；不触碰其它链、引擎代码或工作区其它文件。"
+  },
+  "codeAnchor": {
+    "template": "chains/governance/code-anchor-nodes.json",
+    "schema": "code-anchor-nodes/v1",
+    "autoInject": "spec.autoCodeNodes===true 或 目标链 intent/title 命中 template.detectionKeywords → 自动注入 codeOptimize/bugFix/docGen",
+    "wiring": "首锚点 codeOptimize 接驳目标链末非-halt 节点的 .done/.end 信号；bugFix→code.optimize.done；docGen→code.debug.done",
+    "idempotent": "已存在同 id 节点则跳过（不静默覆盖）"
+  },
+  "budget": {
+    "steps": 20,
+    "llmCalls": 0,
+    "elapsedMs": 60000,
+    "maxWallMs": 600000
+  },
+  "regressionTests": [
+    "spec.target 指向不存在的链 → chainExtend.failed，不写盘",
+    "spec.node.id 已存在且 reinsert=false → chainExtend.failed(reason=exists)，不写盘",
+    "dryRun:true → wrote=false、file 未改动、lint 仍返回",
+    "autoCodeNodes:true 或 目标链 intent 含 'code' → 注入 codeOptimize/bugFix/docGen 三节点，lint 通过",
+    "目标链已含 codeOptimize → 注入跳过该节点（skippedNodeIds 含之），其余照插",
+    "spec.nodes 数组批量插入多节点，一次 lint 闸门覆盖全部"
+  ],
+  "nodes": [
+    {
+      "id": "extend",
+      "kind": "fn",
+      "use": "chainExtend",
+      "trigger": [
+        {
+          "on": "chain.start"
+        }
+      ],
+      "in": {
+        "spec": "$.input"
+      },
+      "out": "$.extend",
+      "declares": [
+        "extend.done",
+        "extend.failed"
+      ]
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "扩展结果闸门",
+      "trigger": [
+        {
+          "on": "signal.extend.done"
+        },
+        {
+          "on": "signal.extend.failed"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.extend.ok === true",
+          "emit": "verify.pass",
+          "label": "扩展成功",
+          "reason": "lint 闸门通过且已写盘"
+        }
+      ],
+      "default": "verify.fail",
+      "declares": [
+        "verify.pass",
+        "verify.fail"
+      ]
+    },
+    {
+      "id": "deliver",
+      "kind": "fn",
+      "use": "deliver",
+      "halt": true,
+      "trigger": [
+        {
+          "on": "signal.verify.pass"
+        },
+        {
+          "on": "signal.verify.fail"
+        }
+      ],
+      "in": {
+        "answer": "$.extend",
+        "artifacts": {
+          "extend": "$.extend"
+        },
+        "quality": {
+          "score": "=$.extend.ok ? 1 : 0"
+        },
+        "completionPackage": {
+          "scope": "给目标链插入节点（chainExtend 元操作）",
+          "designRationale": "以确定性 fn 取代手写 _tmp_*.js：写前 lint 闸门 + 幂等守卫 + mock 重复守卫 + verify 闸门。",
+          "acceptanceCommand": "=coalesce($.extend.file, \"\")",
+          "verificationResults": "=$.extend.lint",
+          "risks": "=$.extend.issues",
+          "openItems": [],
+          "nextSteps": [
+            "如需扩更多节点，调整 --input spec 再次运行",
+            "要预演改动用 dryRun:true；要越过 lint 闸门用 force:true（慎用）"
+          ]
+        }
+      },
+      "out": "$.output",
+      "declares": [
+        "deliver.done",
+        "chain.end"
+      ]
+    }
+  ]
+}

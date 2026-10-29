@@ -1,0 +1,65 @@
+{
+  "id": "sys.prelude",
+  "title": "基础前置链 · 每条链运行前的统一引导",
+  "version": "0.1.0",
+  "tier": "infra",
+  "intent": "在任意触发链正式运行前自动执行，完成输入快照录制（影子回放）与轻量治理前置断言；零 LLM、零副作用、非致命。",
+  "principle": [
+    "前置链是增强而非硬依赖：自身失败不阻断主链。",
+    "只做确定性与快照，绝不烧预算、绝不产生副作用。",
+    "所有链共享同一套前置引导，避免能力散落。"
+  ],
+  "acceptance": [
+    "能在 mock 模型下自然终止（halt）。",
+    "产出 $.prelude 完成包，含 snapshot 与 govern 结果。"
+  ],
+  "redlines": [
+    "不得改写 $.input / $._meta / 主链黑板。",
+    "不得调用任何副作用 fn。",
+    "不得因前置失败阻断主链运行。"
+  ],
+  "boundaries": {
+    "owns": "输入快照录制 + 轻量治理前置断言。",
+    "notOwns": ["主链业务逻辑", "不可逆动作", "建链（属 sys.genesis）"]
+  },
+  "budget": {
+    "maxSteps": 20,
+    "maxLlmCalls": 0,
+    "maxTokens": 20000,
+    "maxWallMs": 30000,
+    "maxNodeRuns": 2
+  },
+  "nodes": [
+    {
+      "id": "snapshot",
+      "kind": "fn",
+      "title": "输入信封 + 黑板初态快照（影子回放录制层）",
+      "use": "prelude.snapshot",
+      "trigger": [{ "on": "chain.start" }],
+      "out": "$.prelude.snapshot",
+      "emit": ["prelude.snapshot"],
+      "declares": ["prelude.snapshot"]
+    },
+    {
+      "id": "govern",
+      "kind": "fn",
+      "title": "轻量治理前置断言（版本号 / 依赖 fn 挂载）",
+      "use": "prelude.govern",
+      "trigger": [{ "on": "signal.prelude.snapshot" }],
+      "out": "$.prelude.govern",
+      "emit": ["prelude.govern"],
+      "declares": ["prelude.govern"]
+    },
+    {
+      "id": "done",
+      "kind": "fn",
+      "title": "产出前置完成包",
+      "use": "prelude.done",
+      "trigger": [{ "on": "signal.prelude.govern" }],
+      "out": "$.prelude",
+      "emit": ["prelude.done"],
+      "declares": ["prelude.done"],
+      "halt": true
+    }
+  ]
+}

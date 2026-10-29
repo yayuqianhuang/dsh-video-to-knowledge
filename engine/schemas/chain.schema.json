@@ -1,0 +1,134 @@
+{
+  "$id": "ajtc/chain.schema.json",
+  "title": "AI JSON 触发链 · 链定义元 Schema",
+  "description": "一条链就是一份纯 JSON 声明。它能被模型读、被模型写、被代码机检——这是整个系统可以自我生成与自我迭代的前提。",
+  "type": "object",
+  "required": ["id", "title", "nodes"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(\\.[a-z0-9-]+)+$",
+      "description": "全局唯一链 id，形如 sys.genesis / g01.divide"
+    },
+    "title": { "type": "string", "minLength": 2 },
+    "version": { "type": "string" },
+    "intent": { "type": "string", "description": "这条链解决什么问题。一句话，能被人和模型同时读懂。" },
+    "principle": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "设计原则。会被注入到本链所有 llm 节点的 system 提示词里，是链的价值观。"
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "maxSteps": { "type": "integer", "minimum": 1 },
+        "maxLlmCalls": { "type": "integer", "minimum": 1 },
+        "maxTokens": { "type": "integer", "minimum": 1 },
+        "maxWallMs": { "type": "integer", "minimum": 1 },
+        "maxNodeRuns": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "acceptance": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "这条链的验收条件，每条必须能用是/否判定。"
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/node" }
+    }
+  },
+
+  "definitions": {
+    "node": {
+      "type": "object",
+      "required": ["id", "kind", "trigger"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]*$" },
+        "kind": { "type": "string", "enum": ["llm", "fn", "gate", "map", "chain", "loop"] },
+        "title": { "type": "string" },
+        "role": { "type": "string", "description": "语义角色，决定提示词模板与 mock 行为，例如 decomposer / critic / extractor" },
+
+        "trigger": {
+          "type": "array",
+          "minItems": 1,
+          "description": "订阅哪些事件。节点从不被主动调用，只被事件唤醒。",
+          "items": {
+            "type": "object",
+            "required": ["on"],
+            "properties": {
+              "on": { "type": "string", "description": "事件名，如 chain.start / signal.split.done / node.done / *" },
+              "from": { "type": "string", "description": "限定事件来源节点 id" },
+              "when": { "type": "string", "description": "额外的表达式守卫，为真才触发" }
+            }
+          }
+        },
+
+        "declares": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "静态声明本节点可能发出的信号。这是链路可达性/终止性分析的唯一依据——不声明就等于对静态检查隐身。"
+        },
+        "emit": { "type": "array", "items": { "type": "string" }, "description": "无条件追加发出的信号" },
+
+        "in": { "description": "输入绑定。字符串按表达式求值，对象递归求值。" },
+        "out": { "type": "string", "description": "把 envelope.data 写到黑板的哪个路径" },
+        "outEnvelope": { "type": "string" },
+        "appendTo": { "type": "string", "description": "把 data 追加到某个数组路径" },
+
+        "maxRuns": { "type": "integer", "minimum": 1, "description": "本节点最大重入次数。处在环路上的节点必须设置。" },
+        "halt": { "type": "boolean", "description": "执行完立刻终止整条链" },
+        "onError": { "type": "object", "properties": { "emit": { "type": "array", "items": { "type": "string" } } } },
+
+        "prompt": {
+          "type": "object",
+          "description": "kind=llm 必填",
+          "properties": {
+            "system": { "type": "string" },
+            "user": { "type": "string" }
+          }
+        },
+        "expect": { "type": "object", "description": "kind=llm 的输出 data 契约（JSON Schema 子集）。缺失即等于放弃校验。" },
+        "retry": {
+          "type": "object",
+          "properties": {
+            "max": { "type": "integer", "minimum": 0 },
+            "onExhausted": { "type": "string", "enum": ["throw", "passthrough"] }
+          }
+        },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+
+        "use": { "type": "string", "description": "kind=fn 时为函数名；kind=chain / map 时为子链 id" },
+
+        "cases": {
+          "type": "array",
+          "description": "kind=gate 必填。自上而下匹配，首个命中即出。",
+          "items": {
+            "type": "object",
+            "required": ["emit"],
+            "properties": {
+              "when": { "type": "string" },
+              "emit": { "type": ["string", "array"] },
+              "label": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          }
+        },
+        "default": { "type": ["string", "array"] },
+
+        "over": { "type": "string", "description": "kind=map 必填，要遍历的数组表达式" },
+        "fn": { "type": "string", "description": "kind=map 时对每项调用的函数" },
+        "limit": { "type": "integer", "minimum": 1 },
+        "onItemError": { "type": "string", "enum": ["continue", "abort"] },
+        "pick": { "type": "string", "description": "kind=chain 时从子链黑板中摘取的字段" },
+
+        "while": { "type": "string", "description": "kind=loop 的继续条件" },
+        "maxRounds": { "type": "integer", "minimum": 1 },
+        "body": { "type": ["string", "array"] },
+        "done": { "type": ["string", "array"] },
+        "counterPath": { "type": "string" }
+      }
+    }
+  }
+}

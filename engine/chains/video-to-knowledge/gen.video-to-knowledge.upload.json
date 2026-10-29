@@ -1,0 +1,245 @@
+{
+  "id": "gen.video-to-knowledge.upload",
+  "title": "视频知识卡 · 单文件落盘子链",
+  "version": "0.1.0",
+  "tier": "infra",
+  "intent": "把一张编译好的 Markdown 知识卡落盘到 kb/<collection>/<fileName>.md（+ 元数据 JSON）。仅做存储：不建向量索引、不调用任何 embedding 端点或本地模型——检索/向量化/重排由 WorkBuddy 工作台承载（D9）。",
+  "principle": [
+    "只落盘，不建索引、不调 embedding；检索增强归 WorkBuddy 工作台。",
+    "落盘前已由主链 dedupeCheck 查重；本子链只负责写入与结果记录。",
+    "默认只增不删：不得删除或覆盖 kb 文件夹既有卡片（同名冲突走 -v2 命名）。",
+    "卡片正文必须保留 [mm:ss] 锚点与 source_url#t=秒 深链，供工作台检索后回跳。",
+    "证据由脚本产出，模型只写叙述层；写入结果写 $.uploadResults。"
+  ],
+  "acceptance": [
+    "卡片写入 kb/<collection>/<fileName>.md，file_size 为真实字节数（wc -c）",
+    "每次写盘记录 {fileName, ok, error?}",
+    "元数据 JSON 与卡片同名同目录",
+    "默认不覆盖既有卡片（冲突走 -v2）",
+    "LLM 调用 = 0（budget 上限 1 作保险）"
+  ],
+  "boundaries": {
+    "owns": "单张卡片的落盘（写 .md + 元数据 JSON）。",
+    "notOwns": [
+      "建向量索引 / 调 embedding（D9 已移交 WorkBuddy 工作台）",
+      "删除 / 覆盖既有卡片",
+      "校验卡片内容（主链 qualityGate 已前置）"
+    ]
+  },
+  "interfaces": {
+    "redlines": "in: $.input.item；emit redlines.pass/redlines.fail",
+    "storeChunk": "in: $.input.item{fileName, content, contentHash, partIndex?, totalParts?} + $.intake.kbPath/collection；out: $.store{fileName, ok, error?, bytes}",
+    "storeGate": "in: $.store；emit file.ok/file.fail",
+    "storeOk": "in: $.store；out: $.output；halt（成功）",
+    "storeFail": "in: $.store；out: $.output；halt（失败，进 failures）"
+  },
+  "regressionTests": [
+    {
+      "id": "RT-VK-UPLOAD-1",
+      "type": "happy",
+      "input": "{\"item\":{\"fileName\":\"BV1xx411c7mD.md\",\"content\":\"# 标题…\",\"contentHash\":\"sha256:…\"},\"kbPath\":\"...\",\"collection\":\"bilibili\"}",
+      "expect": "文件写入 kb/<collection>/，$.store.ok=true，bytes 为真实字节数",
+      "rationale": "单文件落盘主路径"
+    },
+    {
+      "id": "RT-VK-UPLOAD-2",
+      "type": "edge",
+      "input": "目标文件名已存在且 content_hash 不同",
+      "expect": "改写为 <fileName>-v2，$.store.ok=true，不覆盖原文件",
+      "rationale": "只增不删：冲突走版本后缀而非覆盖"
+    },
+    {
+      "id": "RT-VK-UPLOAD-3",
+      "type": "negative",
+      "input": "kbPath 目录不可写 / 磁盘满",
+      "expect": "$.store.ok=false，error 已记录，走 file.fail → storeFail 终止，计入 failures",
+      "rationale": "写入失败须显式记录而非静默吞掉"
+    }
+  ],
+  "budget": {
+    "maxSteps": 20,
+    "maxLlmCalls": 1,
+    "maxTokens": 5000,
+    "maxWallMs": 120000,
+    "maxNodeRuns": 2
+  },
+  "nodes": [
+    {
+      "id": "redlines",
+      "kind": "fn",
+      "use": "redlines",
+      "title": "红线门 / 意图护栏（SSOT: chains/governance/iron-laws.json）",
+      "trigger": [
+        {
+          "on": "chain.start"
+        }
+      ],
+      "in": {
+        "boundaryKeywords": [
+          "覆盖已有卡片",
+          "删除 kb 文件夹已有卡片",
+          "写入 kbPath/collection 之外的路径",
+          "把 SESSDATA 写入卡片或日志"
+        ]
+      },
+      "out": "$.redlines",
+      "emit": [
+        "redlines.pass"
+      ],
+      "declares": [
+        "redlines.pass",
+        "redlines.fail"
+      ],
+      "maxRuns": 2
+    },
+    {
+      "id": "storeChunk",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "落盘单张卡片 + 元数据",
+      "trigger": [
+        {
+          "on": "signal.redlines.pass"
+        }
+      ],
+      "in": {
+        "action": "确保目录 <kbPath>/<collection>/ 存在（不存在则创建）；写入 <collection>/<fileName>.md（内容来自 $.input.item.content，保留 [mm:ss] 锚点与 source_url#t=秒 深链）；同时写同名元数据 JSON（video_id / title / content_hash / part_index / total_parts / storage_mode / retain_raw / compiled_at / source_url）。用 `wc -c` 取真实字节数写 $.store.bytes。禁止覆盖既有卡片——若目标名已存在且 content_hash 不同，改用 <fileName>-v2。写回 $.store={fileName, ok, error?, bytes}。",
+        "visible": "💾 [storeChunk] 落盘卡片 $.input.item.fileName → kb/<collection>/ …",
+        "resultPath": "$.store"
+      },
+      "out": "$.store",
+      "maxRuns": 2,
+      "emit": [
+        "storeChunk.done"
+      ],
+      "declares": [
+        "storeChunk.done"
+      ],
+      "writes": [
+        "$.store"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "store",
+          "--card",
+          "runs/${$.input.item.videoId}/card.json",
+          "--file-name",
+          "${$.input.item.fileName}",
+          "--kb",
+          "${$.input.item.kbPath}",
+          "--collection",
+          "${$.input.item.collection}"
+        ]
+      }
+    },
+    {
+      "id": "storeGate",
+      "kind": "gate",
+      "title": "落盘结果校验门 / 评审门（verify 机器判定）",
+      "trigger": [
+        {
+          "on": "signal.storeChunk.done"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.store.ok == true",
+          "emit": "file.ok",
+          "label": "落盘成功",
+          "reason": "文件已写入且字节数真实"
+        },
+        {
+          "when": "$.store.ok == false",
+          "emit": "file.fail",
+          "label": "落盘失败",
+          "reason": "写入异常，已记录 error"
+        }
+      ],
+      "out": "$.storeCheck",
+      "default": "file.fail",
+      "declares": [
+        "file.ok",
+        "file.fail"
+      ]
+    },
+    {
+      "id": "storeOk",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "汇总（成功）并终止子链",
+      "trigger": [
+        {
+          "on": "signal.file.ok"
+        }
+      ],
+      "in": {
+        "answer": "=$.store",
+        "quality": {
+          "ok": true
+        },
+        "completionPackage": {
+          "scope": "落盘卡片 $.store.fileName",
+          "narrative": {
+            "summary": "= \"卡片 \" + $.store.fileName + \" 已落盘（\" + $.store.bytes + \" 字节）\"",
+            "note": "叙述层（AI 写）：面向人说明落盘了什么"
+          },
+          "evidence": {
+            "note": "证据层（机器出）：真实字节数与写入路径，模型无法改写",
+            "fileName": "=$.store.fileName",
+            "bytes": "=$.store.bytes"
+          }
+        }
+      },
+      "out": "$.output",
+      "declares": [
+        "storeOk.done",
+        "chain.end"
+      ],
+      "emit": [
+        "chain.end"
+      ]
+    },
+    {
+      "id": "storeFail",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "汇总（失败）并终止子链",
+      "trigger": [
+        {
+          "on": "signal.file.fail"
+        },
+        {
+          "on": "signal.redlines.fail"
+        }
+      ],
+      "in": {
+        "answer": null,
+        "quality": {
+          "ok": false
+        },
+        "completionPackage": {
+          "scope": "落盘卡片 $.store.fileName（失败）",
+          "narrative": {
+            "summary": "= \"卡片 \" + $.store.fileName + \" 落盘失败：\" + $.store.error",
+            "note": "叙述层（AI 写）：面向人说明失败原因"
+          },
+          "evidence": {
+            "note": "证据层（机器出）：error 原文与写入尝试记录，模型无法改写",
+            "fileName": "=$.store.fileName",
+            "error": "=$.store.error"
+          }
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "storeFail.done",
+        "chain.end"
+      ]
+    }
+  ],
+  "creed": "road"
+}

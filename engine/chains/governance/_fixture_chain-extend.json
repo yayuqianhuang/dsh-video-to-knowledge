@@ -1,0 +1,97 @@
+{
+  "id": "fixture.chain-extend",
+  "title": "链扩展器回归夹具",
+  "version": "0.0.1",
+  "tier": "utility",
+  "intent": "回归夹具：仅用于验证 gen.chain-extend 的写盘路径（节点插入 + trigger 改写 + lint 闸门 + 版本号自增）。",
+  "principle": [
+    "仅供 gen.chain-extend 回归测试，不参与任何业务运行"
+  ],
+  "acceptance": [
+    "可被 gen.chain-extend 扩展且扩展后 lint 仍 0 错误"
+  ],
+  "redlines": [],
+  "boundaries": {},
+  "budget": {
+    "steps": 10,
+    "llmCalls": 0,
+    "elapsedMs": 10000,
+    "maxWallMs": 600000
+  },
+  "regressionTests": [],
+  "nodes": [
+    {
+      "id": "intake",
+      "kind": "fn",
+      "use": "intake",
+      "trigger": [
+        {
+          "on": "chain.start"
+        }
+      ],
+      "in": {
+        "raw": "$.input"
+      },
+      "out": "$.intake",
+      "declares": [
+        "intake.ready",
+        "intake.invalid"
+      ]
+    },
+    {
+      "id": "process",
+      "kind": "fn",
+      "use": "noop",
+      "trigger": [
+        {
+          "on": "signal.intake.ready"
+        }
+      ],
+      "emit": [
+        "process.done"
+      ],
+      "out": "$.process",
+      "declares": [
+        "process.done"
+      ]
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "夹具闸门",
+      "trigger": [
+        {
+          "on": "signal.process.done"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.process != null",
+          "emit": "verify.pass",
+          "label": "已处理"
+        }
+      ],
+      "default": "verify.fail",
+      "declares": [
+        "verify.pass",
+        "verify.fail"
+      ]
+    },
+    {
+      "id": "deliver",
+      "kind": "fn",
+      "use": "deliver",
+      "halt": true,
+      "trigger": [
+        {
+          "on": "signal.verify.pass"
+        }
+      ],
+      "out": "$.output",
+      "declares": [
+        "deliver.done",
+        "chain.end"
+      ]
+    }
+  ]
+}

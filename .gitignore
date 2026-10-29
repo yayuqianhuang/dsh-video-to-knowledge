@@ -1,0 +1,11 @@
+node_modules/
+.runtime/
+.shadow-test/
+run-shadow/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+cookies.txt
+bili-cookies.txt
+*.tgz

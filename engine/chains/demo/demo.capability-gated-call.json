@@ -1,0 +1,211 @@
+{
+  "id": "demo.capability-gated-call",
+  "title": "能力门控调用示例链（授权 + 嵌套子链 + 长任务迭代）",
+  "version": "0.1.0",
+  "tier": "reference",
+  "intent": "最小氛围实验：演示触发链经授权门（校验基础链签发的能力令牌）后，嵌套调用基础链完成注册/续期（流程内调用流程），并以 loop 节点驱动长时任务的逐轮迭代逼近，直至收敛或达最大轮次后输出终态。对应 docs/tech-asset-rights-orchestration-arch.md §7。",
+  "principle": [
+    "未持有效令牌不得调用受保护能力；授权失败即终止。",
+    "嵌套调用走 chain 节点（同步 spawn→wait），子链即基础链。",
+    "长时任务用 loop 节点逐轮逼近，每轮评估收敛指标，达收敛或 maxRounds 即停。",
+    "每轮子流程执行后按需向基础链续期令牌（per-round renewal，见 §10 Q2）。",
+    "所有决策走确定性 fn，LLM 调用数为 0。"
+  ],
+  "acceptance": [
+    "authGate 对有效令牌 emit capability.ok、对失效/越权令牌 emit capability.denied 并终止。",
+    "issueCap 通过 chain 节点成功嵌套调用 asset.rights-registry 并取回令牌。",
+    "loop 节点驱动 roundExec 迭代：轮次递增、gap 递减，收敛后 emit final.done。",
+    "finalize 在 final.done 处 halt，output.completionPackage 含收敛标志与轮次。",
+    "链在预算内自然终止，不熔断。"
+  ],
+  "redlines": [
+    "不得在 capability.denied 后仍继续调用受保护能力",
+    "不得绕过授权门直接调用资产",
+    "不得修改基础链运行状态以外的任何系统",
+    "不得伪造令牌或签名"
+  ],
+  "boundaries": {
+    "owns": "一次受保护调用的授权校验、子链编排、长时任务迭代与终态输出。",
+    "notOwns": [
+      "基础链的资产登记/令牌签发权威（属 asset.rights-registry）",
+      "被保护能力本身的业务实现",
+      "跨组织信任结算"
+    ],
+    "escalateTo": "战略层（人）—— 基础链密钥轮换、scope 策略变更等交人裁定"
+  },
+  "budget": {
+    "maxSteps": 56,
+    "maxLlmCalls": 0,
+    "maxTokens": 4000,
+    "maxWallMs": 300000,
+    "maxNodeRuns": 8
+  },
+  "regressionTests": [
+    {
+      "id": "RT-DEMO-1",
+      "type": "happy",
+      "input": "持有效令牌的受保护调用请求",
+      "expect": "依次走 prepare→issueCap→authGate(ok)→iterate→roundExec×N→finalize，output.completionPackage.converged=true",
+      "rationale": "主路径须端到端贯通并收敛"
+    },
+    {
+      "id": "RT-DEMO-2",
+      "type": "guard",
+      "input": "无效/过期令牌",
+      "expect": "authGate emit capability.denied → denied 节点 halt，不进入 iterate",
+      "rationale": "授权失败必须终止"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "prepare",
+      "kind": "fn",
+      "title": "准备任务与授权上下文",
+      "use": "demoPrepare",
+      "trigger": [
+        { "on": "chain.start" }
+      ],
+      "in": {
+        "task": "=$.input.task",
+        "assetId": "=$.input.assetId",
+        "subject": "=$.input.subject",
+        "scope": "=$.input.scope"
+      },
+      "out": "$.task",
+      "emit": [ "task.ready" ],
+      "declares": [ "task.ready" ],
+      "maxRuns": 1
+    },
+    {
+      "id": "issueCap",
+      "kind": "chain",
+      "title": "嵌套调用基础链：注册并签发能力令牌（流程内调用流程）",
+      "use": "asset.rights-registry",
+      "trigger": [
+        { "on": "signal.task.ready" }
+      ],
+      "in": {
+        "assetId": "=$.task.assetId",
+        "name": "=$.task.assetId",
+        "kind": "model",
+        "owner": "demo-trigger",
+        "hash": "=$.task.assetId",
+        "meta": { "purpose": "capability-gated-call" },
+        "subject": "=$.task.subject",
+        "scope": "=$.task.scope",
+        "ttlSeconds": 300
+      },
+      "out": "$.cap",
+      "emit": [ "cap.issued" ],
+      "declares": [ "cap.issued" ],
+      "maxRuns": 1
+    },
+    {
+      "id": "authGate",
+      "kind": "fn",
+      "title": "授权门：校验能力令牌",
+      "use": "demoAuthGate",
+      "trigger": [
+        { "on": "signal.cap.issued" }
+      ],
+      "in": {
+        "token": "=$.cap.registry.cap.token",
+        "assetId": "=$.cap.registry.asset.assetId",
+        "scope": "=$.task.scope"
+      },
+      "out": "$.auth",
+      "declares": [ "capability.ok", "capability.denied" ],
+      "maxRuns": 1
+    },
+    {
+      "id": "denied",
+      "kind": "fn",
+      "title": "授权失败提前终止",
+      "use": "demoFinalize",
+      "trigger": [
+        { "on": "signal.capability.denied" }
+      ],
+      "in": {
+        "task": "=$.task",
+        "iteration": null,
+        "denied": true,
+        "reason": "capability denied"
+      },
+      "out": "$.output",
+      "emit": [ "chain.end" ],
+      "declares": [ "chain.end" ]
+    },
+    {
+      "id": "iterate",
+      "kind": "loop",
+      "title": "长时任务迭代控制器（逐轮逼近，收敛或达上限即停）",
+      "trigger": [
+        { "on": "signal.capability.ok" },
+        { "on": "signal.round.done" }
+      ],
+      "counterPath": "$._loops.iterate",
+      "maxRounds": 8,
+      "while": "$.iteration.converged != true",
+      "body": "round.run",
+      "done": "final.done",
+      "out": "$.loop",
+      "declares": [ "round.run", "final.done" ],
+      "maxRuns": 8
+    },
+    {
+      "id": "roundExec",
+      "kind": "fn",
+      "title": "执行单轮工作并评估收敛指标",
+      "use": "demoRoundExec",
+      "trigger": [
+        { "on": "signal.round.run" }
+      ],
+      "in": {
+        "task": "=$.task",
+        "iteration": "=$.iteration",
+        "round": "=$.loop.round"
+      },
+      "out": "$.iteration",
+      "emit": [ "round.done" ],
+      "declares": [ "round.done" ],
+      "maxRuns": 8
+    },
+    {
+      "id": "renew",
+      "kind": "fn",
+      "title": "每轮向基础链续期令牌（per-round renewal，见 §10 Q2；轻量子链调用，复用已登记资产）",
+      "use": "rightsRenewCapability",
+      "trigger": [
+        { "on": "signal.round.run" }
+      ],
+      "in": {
+        "assetId": "=$.task.assetId",
+        "subject": "=$.task.subject",
+        "scope": "=$.task.scope",
+        "ttlSeconds": 300
+      },
+      "out": "$.renewal",
+      "emit": [ "renewal.done" ],
+      "declares": [ "renewal.done" ],
+      "maxRuns": 8
+    },
+    {
+      "id": "finalize",
+      "kind": "fn",
+      "title": "封装终态并终止",
+      "use": "demoFinalize",
+      "trigger": [
+        { "on": "signal.final.done" }
+      ],
+      "in": {
+        "task": "=$.task",
+        "iteration": "=$.iteration",
+        "denied": false,
+        "reason": null
+      },
+      "out": "$.output",
+      "emit": [ "chain.end" ],
+      "declares": [ "chain.end" ]
+    }
+  ]
+}

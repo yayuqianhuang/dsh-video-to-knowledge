@@ -1,0 +1,620 @@
+{
+  "id": "sys.genesis",
+  "title": "元链 · 生成并初始化其他触发链",
+  "version": "1.2.0",
+  "tier": "combat",
+  "intent": "接收一句自然语言的建链需求，产出一条结构合法、可达、可终止、已通过空跑验证的新触发链，并落盘注册。",
+  "principle": [
+    "骨架由代码生成，语义由模型生成——模型最容易写错的地方一律不交给模型。",
+    "任何生成物在落盘前必须通过静态检查 + 空跑双重验证，不合格就打回重修。",
+    "修复循环必须有刹车：三处 maxRuns 保证元链自身永远不会跑飞。",
+    "生成失败也要产出报告，说明卡在哪一步，而不是静默失败。",
+    "生成的每一条子链都必须自带逐步反馈能力（信号 + 追踪），运行过程可被逐步复盘。"
+  ],
+  "acceptance": [
+    "产出的链能通过 linter（0 个 error）",
+    "产出的链能在 mock 模型下自然终止而非被预算熔断",
+    "无论成功失败都产出一份可读的建链报告",
+    "产出符合各节点声明的输出契约（expect），无契约违例。",
+    "链在预算内自然终止（走到 halt 节点），而非被熔断或耗尽预算。"
+  ],
+  "redlines": [
+    "AI 不得单方定义或降低成功标准",
+    "AI 不得伪造证据、编造数据或结果",
+    "不得跳过任何验收门（review / assert / 回归）",
+    "不得越出本链声明的作战边界，侵入不归本链管辖的系统或数据",
+    "不得删除或覆盖运行证据与追踪记录"
+  ],
+  "boundaries": {
+    "owns": "接收一句自然语言的建链需求，产出一条结构合法、可达、可终止、已通过空跑验证的新触发链，并落盘注册。",
+    "notOwns": [
+      "战略目标与验收标准的设定（属人，AI 只能执行与追问）",
+      "超出本链 intent 声明范围的系统、代码与数据",
+      "删除 / 迁移 / 资金 / 对外承诺等不可逆动作的最终决策"
+    ],
+    "escalateTo": "战略层（人）—— 经 clarify 护栏发 clarify.block，由 bail 收口交回"
+  },
+  "budget": {
+    "maxSteps": 300,
+    "maxLlmCalls": 24,
+    "maxTokens": 300000,
+    "maxWallMs": 600000,
+    "maxNodeRuns": 8
+  },
+  "regressionTests": [
+    {
+      "id": "RT-GENESIS-1",
+      "type": "happy",
+      "input": "一个本链 intent 范围内、目标明确的正常请求",
+      "expect": "链走完主干阶段并从 deliver 终止，output.completionPackage 字段齐全，evidence.hashes 非空",
+      "rationale": "主路径必须可达终点，这是所有其他用例的前提"
+    },
+    {
+      "id": "RT-GENESIS-2",
+      "type": "guard",
+      "input": "空目标或只有一句无法执行的模糊话",
+      "expect": "intake 判非法 → intake.invalid → bail 终止，不进入任何 llm 节点",
+      "rationale": "垃圾输入不该烧预算"
+    },
+    {
+      "id": "RT-GENESIS-3",
+      "type": "governance",
+      "input": "含高危不可逆措辞的目标（如「删掉现有实现从零重写」）",
+      "expect": "clarify 判为 (B) 并 emit clarify.block → bail 拦截；接真实模型时须拦住，mock 下因占位放行须以真实模型复验",
+      "rationale": "护栏形同虚设是本框架最贵的失败模式"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "spec",
+      "kind": "fn",
+      "title": "建链需求规格化",
+      "use": "genesis.spec",
+      "trigger": [
+        {
+          "on": "chain.start"
+        }
+      ],
+      "in": {
+        "raw": "$.input"
+      },
+      "out": "$.spec",
+      "declares": [
+        "spec.ready",
+        "spec.invalid"
+      ]
+    },
+    {
+      "id": "clarify",
+      "kind": "llm",
+      "title": "防误解护栏（高危意图澄清 · 不可逆动作交回人裁定）",
+      "role": "intent-guard",
+      "trigger": [
+        {
+          "on": "signal.spec.ready"
+        }
+      ],
+      "prompt": {
+        "system": "你是一条 AI JSON 触发链上的执行单元（intent-guard / 防误解护栏）。\n只输出一个 JSON 对象。不要代码围栏，不要解释，不要寒暄。\n输出必须是统一信封格式：{\"meta\":{},\"data\":{},\"signals\":[],\"issues\":[]}。\n\n【你的职责】在链进入实质执行之前，澄清用户的真实意图，拦截「AI 单方执行不可逆高危动作」的风险。\n你不制定计划、不产出业务结果、不替人做战略决策。\n\n【高危意图清单】用户目标或约束中出现以下任一指向时，视为待澄清：\n- 删除或覆盖已有链定义\n- 改写引擎内核 src/engine/*\n- 生成会执行删除/迁移动作的链\n\n【三种判别】\n(A) 目标明确且不触及高危动作 → 直接放行。\n(A2) 触及高危措辞，但用户已明确声明「保留现有 / 不删 / 存量不动 / 平行新增」等可逆口径 → 放行，并在 note 中记录已确认的可逆口径。\n(B) 明确指向不可逆高危动作（真删除 / 真重写 / 真迁移 / 真付款），且没有人给出显式授权 → 拦截。\n\n【你的动作】\n- (A) / (A2) → emit \"clarify.done\"，data.verdict 写 \"pass\"，data.note 说明判别依据。\n- (B) → emit \"clarify.block\"，data.verdict 写 \"block\"；data.note 写明：该意图属不可逆高危动作，依「带 AI 打仗」四层治理须上交战略层（人）裁定，\n  并要求人在 boundaries / constraints 中显式授权（override）后方可继续。AI 不得单方决定执行。边界依据：本链只生成 chains/ 下的链定义，不得改动 src/engine 内核实现。\n\n【判定尺度】措辞模糊时优先放行并在 note 标注「待人确认口径」；只有表述明确指向 (B) 才拦截。宁可多问一句，不可少拦一次。",
+        "user": "【用户原始目标】\n{{$.spec.goal}}\n\n【原始输入】\n{{$.input}}\n\n【人定成功标准】\n{{$.spec.successCriteria}}\n\n【人定禁区】\n{{$.spec.boundaries}}\n\n【人定约束】\n{{$.spec.constraints}}\n\n判断上述输入属于 (A) 安全 / (A2) 高危措辞但口径可逆 / (B) 不可逆高危动作 中的哪一种。\n按判别结果在 signals 中 emit 对应信号（clarify.done 或 clarify.block），并在 data 中给出 verdict / intent / note。"
+      },
+      "expect": {
+        "type": "object",
+        "properties": {
+          "verdict": {
+            "type": "string"
+          },
+          "intent": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      },
+      "temperature": 0.1,
+      "retry": {
+        "max": 1,
+        "onExhausted": "throw"
+      },
+      "out": "$.clarify",
+      "emit": [
+        "clarify.done"
+      ],
+      "declares": [
+        "clarify.done",
+        "clarify.block"
+      ],
+      "maxRuns": 2
+    },
+    {
+      "id": "redlines",
+      "kind": "fn",
+      "title": "红线门：禁止 AI 越权 / 伪造 / 跳门 / 越界 / 丢证据",
+      "use": "redlines",
+      "trigger": [
+        {
+          "on": "signal.clarify.done"
+        }
+      ],
+      "out": "$.redlines",
+      "declares": [
+        "redlines.pass",
+        "redlines.fail"
+      ],
+      "maxRuns": 2,
+      "in": {
+        "boundaryKeywords": [
+          "kernel",
+          "内核",
+          "src/engine"
+        ]
+      }
+    },
+    {
+      "id": "bail",
+      "kind": "fn",
+      "title": "需求不合法，提前终止",
+      "use": "deliver",
+      "trigger": [
+        {
+          "on": "signal.spec.invalid"
+        },
+        {
+          "on": "signal.clarify.block"
+        },
+        {
+          "on": "signal.redlines.fail"
+        }
+      ],
+      "in": {
+        "answer": null,
+        "quality": {
+          "aborted": true,
+          "reason": "建链需求缺少目标描述"
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "chain.end"
+      ]
+    },
+    {
+      "id": "blueprint",
+      "kind": "llm",
+      "title": "设计链蓝图",
+      "role": "chain-architect",
+      "trigger": [
+        {
+          "on": "signal.redlines.pass"
+        }
+      ],
+      "prompt": {
+        "system": "你是一条 AI JSON 触发链上的一个执行单元，不是聊天助手。\n只输出一个 JSON 对象。不要代码围栏，不要解释，不要寒暄，不要在 JSON 前后添加任何字符。\n输出必须是统一信封格式：{\"meta\":{},\"data\":{},\"signals\":[],\"issues\":[]}。\n  meta   放置 confidence（0-1 的自评置信度）与你认为重要的元信息；\n  data   放置本节点的实质产出，必须严格符合下方给出的输出契约；\n  signals 放置你判断应当触发的下游信号名，只能从「可用信号」中选择；\n  issues 放置你发现的问题，格式 {\"severity\":\"low|medium|high|critical\",\"where\":\"\",\"msg\":\"\"}。\n证据不足时，把对应字段置为 null 并在 issues 中说明，绝不允许编造。\n如果输入自相矛盾，不要自行折中，必须在 issues 中显式指出冲突。\n你是一个可被逐步观察的执行单元：整条链的运行过程（每个节点的触发、输入、产出、信号）都会被追踪器记录并可逐步复盘，不要把中间过程当黑箱。\n版本号遵循三段式 v主.次.修：① 每个新链的初始版本一律为 v0.0.1（原型稿/测试版）；② 第一位 MAJOR：发生「大版本更新」(不兼容变更、架构级重构、删除/重命名节点 id、改信号协议或 envelope 契约结构)时升 1 并归零后两位；③ 第二位 MINOR：新增或更新某个「模块」(节点、角色、子能力、整段逻辑)时升 1 并归零 PATCH；④ 第三位 PATCH：小需求变动(文案/调参/字段微调/单节点局部改动/小 bug 修复)时升 1。绝不要无脑升 MAJOR。\n\n【你的角色】chain-architect（触发链架构师）\n【你的职责】为给定目标设计一条触发链的蓝图。你只设计阶段序列与角色分工，不要输出完整链 JSON——编译由脚手架负责。阶段数控制在 3-7 个，每个阶段必须有明确产出。\n\n【什么是触发链】\n一条链由若干节点组成。节点不被主动调用，而是订阅事件被唤醒；节点执行后发出信号，信号唤醒下游节点。\n你现在只需要设计「阶段序列」：有哪几个阶段、每个阶段用什么角色、各自要产出什么。\n触发器接线、入口归一化、质量门、迭代刹车、终止节点这些骨架，由编译器自动生成，你不要操心，也不要输出。\n\n【设计准则】\n  1. 阶段数控制在 3-7 个。少于 3 个通常说明没有真正分解，多于 7 个通常是过度设计。\n  2. 每个阶段必须有**可被校验的产出**。说不清产出什么的阶段，就不该存在。\n  3. 相邻阶段之间要有真实的信息增量。只是\"换个说法重复一遍\"的阶段要合并掉。\n  4. 优先复用【可用角色】里的角色，它们自带经过打磨的提示词模板与输出契约。\n  5. 如果【已有链】里已经有 intent 高度重合的链，在 issues 里指出来，建议复用或合并而不是新建——避免无限新增。\n  6. 每个阶段都要可被逐步反馈：节点执行后应通过信号与追踪器暴露本步的操作与产出，整条链的运行过程可被逐步复盘，不能是黑箱。\n  7. 版本号遵循三段式 v主.次.修：每个新链初始为 v0.0.1（原型稿/测试版）；第一位 MAJOR 在发生「大版本更新」(不兼容变更、删/改名节点 id、改信号协议或 envelope 契约结构)时升 1 并归零后两位；第二位 MINOR 在新增或更新某个「模块」(节点/角色/子能力/整段逻辑)时升 1 并归零 PATCH；第三位 PATCH 在小需求变动(文案/调参/字段微调/单节点局部改动/小 bug 修复)时升 1。绝不要无脑升 MAJOR。\n  8. （推荐范式）遵循「带AI打仗」四层模型：战略层（intent/principle/acceptance）由人定方向；建制层（nodes/budget/expect/版本号）是制度；战术层（llm/fn/gate/map/loop）由AI执行；裁决层（lint五门/review/test-executor/deliver完成包）由机器裁定。\n  9. （推荐范式）deliver 节点尽量输出完成包（completionPackage）：变更范围、设计说明、风险、验收命令、原始验证结果、回归/兼容说明、未完成事项、下一步建议。\n\n【输出契约 data 必须满足】\n  - chainId (string, 必填)\n  - title (string, 必填)\n  - intent (string, 必填)\n  - principle (array, 可选)\n  - stages (array, 必填，至少 2 项)\n  - qualityGate (boolean, 可选)\n  - iterate (object, 可选)\n  - acceptance (array, 可选)\n\n【可用信号】blueprint.ready",
+        "user": "【建链需求】\n{{$.spec.goal}}\n\n【领域】{{$.spec.domain}}\n【期望阶段数】{{$.spec.expectedStages}}（为空表示由你决定）\n【额外约束】\n{{$.spec.constraints}}\n【验收条件】\n{{$.spec.acceptance}}\n\n【可用角色（强烈建议从中选择）】\n{{$.spec.availableRoles}}\n\n【本系统已有的链（避免重复造）】\n{{$.spec.existingChains}}\n\n现在输出蓝图 JSON 信封。stages 里每一项只要 id / role / title / intent / produces 五个字段。"
+      },
+      "expect": {
+        "type": "object",
+        "required": [
+          "chainId",
+          "title",
+          "intent",
+          "stages"
+        ],
+        "properties": {
+          "chainId": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(\\.[a-z0-9-]+)+$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "intent": {
+            "type": "string"
+          },
+          "principle": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "stages": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "role",
+                "intent"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-zA-Z0-9_]*$"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "intent": {
+                  "type": "string"
+                },
+                "produces": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "qualityGate": {
+            "type": "boolean"
+          },
+          "iterate": {
+            "type": "object"
+          },
+          "acceptance": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "temperature": 0.3,
+      "retry": {
+        "max": 2,
+        "onExhausted": "throw"
+      },
+      "out": "$.blueprint",
+      "emit": [
+        "blueprint.ready"
+      ],
+      "declares": [
+        "blueprint.ready"
+      ],
+      "maxRuns": 3
+    },
+    {
+      "id": "scaffold",
+      "kind": "fn",
+      "title": "蓝图编译为链定义",
+      "use": "genesis.scaffold",
+      "trigger": [
+        {
+          "on": "signal.blueprint.ready"
+        }
+      ],
+      "in": {
+        "blueprint": "$.blueprint",
+        "spec": "$.spec"
+      },
+      "out": "$.draft",
+      "declares": [
+        "scaffold.done"
+      ]
+    },
+    {
+      "id": "lint",
+      "kind": "fn",
+      "title": "链定义静态检查",
+      "use": "genesis.lint",
+      "trigger": [
+        {
+          "on": "signal.scaffold.done"
+        },
+        {
+          "on": "signal.patch.applied"
+        }
+      ],
+      "in": {
+        "chain": "$.draft.chain"
+      },
+      "out": "$.lint",
+      "maxRuns": 5,
+      "declares": [
+        "lint.pass",
+        "lint.fail"
+      ]
+    },
+    {
+      "id": "repair",
+      "kind": "llm",
+      "title": "按检查报告生成补丁",
+      "role": "chain-fixer",
+      "trigger": [
+        {
+          "on": "signal.lint.fail"
+        }
+      ],
+      "prompt": {
+        "system": "你是一条 AI JSON 触发链上的一个执行单元，不是聊天助手。\n只输出一个 JSON 对象。不要代码围栏，不要解释，不要寒暄，不要在 JSON 前后添加任何字符。\n输出必须是统一信封格式：{\"meta\":{},\"data\":{},\"signals\":[],\"issues\":[]}。\n  meta   放置 confidence（0-1 的自评置信度）与你认为重要的元信息；\n  data   放置本节点的实质产出，必须严格符合下方给出的输出契约；\n  signals 放置你判断应当触发的下游信号名，只能从「可用信号」中选择；\n  issues 放置你发现的问题，格式 {\"severity\":\"low|medium|high|critical\",\"where\":\"\",\"msg\":\"\"}。\n证据不足时，把对应字段置为 null 并在 issues 中说明，绝不允许编造。\n如果输入自相矛盾，不要自行折中，必须在 issues 中显式指出冲突。\n你是一个可被逐步观察的执行单元：整条链的运行过程（每个节点的触发、输入、产出、信号）都会被追踪器记录并可逐步复盘，不要把中间过程当黑箱。\n版本号遵循三段式 v主.次.修：① 每个新链的初始版本一律为 v0.0.1（原型稿/测试版）；② 第一位 MAJOR：发生「大版本更新」(不兼容变更、架构级重构、删除/重命名节点 id、改信号协议或 envelope 契约结构)时升 1 并归零后两位；③ 第二位 MINOR：新增或更新某个「模块」(节点、角色、子能力、整段逻辑)时升 1 并归零 PATCH；④ 第三位 PATCH：小需求变动(文案/调参/字段微调/单节点局部改动/小 bug 修复)时升 1。绝不要无脑升 MAJOR。\n\n【你的角色】chain-fixer（链修复器）\n【你的职责】根据 linter 报告修复链定义。只输出补丁操作，不要重写整条链。每个补丁要对应一条 linter finding 的规则编号。\n\n【补丁路径语法】\n  nodes.<节点id>.<字段>      按节点 id 定位，例如 nodes.review.maxRuns\n  nodes.<节点id>.prompt.user 支持多级路径\n  $.budget.maxLlmCalls       链级字段用 $. 开头\n\n【补丁操作】set 覆盖 / merge 浅合并对象 / push 追加到数组 / remove 删除\n\n【常见 linter 规则与标准修法】\n  L003 缺必备字段     → set 补上该字段\n  L004 孤儿节点       → 通常是上游 declares 漏了信号：push 到上游节点的 declares；或改本节点 trigger\n  L005 悬空信号       → 一般可忽略（info）\n  L006 无终止路径     → 给终点节点 set halt=true，或补一个 fn:deliver 节点\n  L007 无刹车环路     → 给环上节点 set maxRuns（建议 2-5）\n  L008 幽灵依赖       → 修正引用路径，或给上游节点 set out 到该路径\n  L009 缺输出契约     → set expect 为一个 JSON Schema 对象\n  L010 预算不足       → set $.budget.maxLlmCalls 为 llm 节点数的 2-3 倍\n\n【铁律】只修 linter 明确报出的 error 与 warn，不要顺手重构。改不了的放进 unfixable 并说明原因。\n\n【输出契约 data 必须满足】\n  - patches (array, 必填)\n  - unfixable (array, 可选)\n\n【可用信号】repair.ready / repair.impossible",
+        "user": "【第 {{$.lint.round}} 轮检查报告】\n错误 {{$.lint.summary.errors}} 条，警告 {{$.lint.summary.warnings}} 条，评分 {{$.lint.score}}\n\n【需要修复的问题】\n{{$.lint.findings}}\n\n【当前链的节点摘要】\n{{pluck($.draft.chain.nodes, \"id\")}}\n\n【当前链定义】\n{{$.draft.chain}}\n\n现在输出补丁 JSON 信封。每条补丁必须带 rule 字段指明它修的是哪条规则。"
+      },
+      "expect": {
+        "type": "object",
+        "required": [
+          "patches"
+        ],
+        "properties": {
+          "patches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "op",
+                "path"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "set",
+                    "merge",
+                    "push",
+                    "remove"
+                  ]
+                },
+                "path": {
+                  "type": "string"
+                },
+                "value": {},
+                "rule": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "unfixable": {
+            "type": "array"
+          }
+        }
+      },
+      "temperature": 0.1,
+      "retry": {
+        "max": 1,
+        "onExhausted": "passthrough"
+      },
+      "out": "$.repair",
+      "emit": [
+        "repair.ready"
+      ],
+      "declares": [
+        "repair.ready"
+      ],
+      "maxRuns": 3
+    },
+    {
+      "id": "applyPatch",
+      "kind": "fn",
+      "title": "应用补丁",
+      "use": "genesis.applyPatch",
+      "trigger": [
+        {
+          "on": "signal.repair.ready"
+        }
+      ],
+      "in": {
+        "chain": "$.draft.chain",
+        "patches": "$.repair.patches"
+      },
+      "out": "$.patchResult",
+      "maxRuns": 3,
+      "declares": [
+        "patch.applied"
+      ]
+    },
+    {
+      "id": "dryRun",
+      "kind": "fn",
+      "title": "mock 空跑验证",
+      "use": "genesis.dryRun",
+      "trigger": [
+        {
+          "on": "signal.lint.pass"
+        }
+      ],
+      "in": {
+        "chain": "$.draft.chain"
+      },
+      "out": "$.dryrun",
+      "declares": [
+        "dryrun.ok",
+        "dryrun.fail"
+      ]
+    },
+    {
+      "id": "verdict",
+      "kind": "gate",
+      "title": "是否准予落盘",
+      "trigger": [
+        {
+          "on": "signal.dryrun.ok"
+        },
+        {
+          "on": "signal.dryrun.fail"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.lint.ok && $.dryrun.ok",
+          "emit": "genesis.approve",
+          "label": "通过",
+          "reason": "静态检查与空跑均通过"
+        },
+        {
+          "when": "$.lint.ok && !$.dryrun.ok",
+          "emit": "genesis.reject",
+          "label": "空跑失败",
+          "reason": "结构合法但跑不通"
+        }
+      ],
+      "default": "genesis.reject",
+      "declares": [
+        "genesis.approve",
+        "genesis.reject"
+      ]
+    },
+    {
+      "id": "write",
+      "kind": "fn",
+      "title": "写入 chains/ 并注册",
+      "use": "genesis.write",
+      "trigger": [
+        {
+          "on": "signal.genesis.approve"
+        }
+      ],
+      "in": {
+        "chain": "$.draft.chain"
+      },
+      "out": "$.written",
+      "declares": [
+        "write.done"
+      ]
+    },
+    {
+      "id": "evidence",
+      "kind": "fn",
+      "title": "证据层军报：归档原始产物 + Hash + 可重跑命令（机器出，不可编造）",
+      "use": "evidence",
+      "trigger": [
+        {
+          "on": "signal.write.done"
+        },
+        {
+          "on": "signal.genesis.reject"
+        }
+      ],
+      "out": "$.evidence",
+      "emit": [
+        "evidence.done"
+      ],
+      "declares": [
+        "evidence.done"
+      ],
+      "in": {
+        "artifacts": {
+          "spec": "$.spec",
+          "blueprint": "$.blueprint",
+          "scaffold": "$.draft",
+          "lint": "$.lint",
+          "repair": "$.repair",
+          "applyPatch": "$.patchResult",
+          "dryRun": "$.dryrun",
+          "write": "$.written",
+          "report": "$.output"
+        }
+      }
+    },
+    {
+      "id": "assert",
+      "kind": "fn",
+      "title": "交付前独立断言（机器门，不接受 AI 自证）",
+      "use": "assert",
+      "trigger": [
+        {
+          "on": "signal.evidence.done"
+        }
+      ],
+      "in": {
+        "conditions": [
+          {
+            "expr": "$.redlines.passed == true",
+            "msg": "红线门未通过",
+            "where": "redlines",
+            "severity": "critical"
+          },
+          {
+            "expr": "$.evidence != null",
+            "msg": "证据包未生成",
+            "where": "evidence",
+            "severity": "high"
+          },
+          {
+            "expr": "len($.evidence.hashes) >= 1",
+            "msg": "证据 Hash 为空，产出无法验真",
+            "where": "evidence",
+            "severity": "medium"
+          }
+        ]
+      },
+      "out": "$.assert",
+      "declares": [
+        "assert.passed",
+        "assert.failed"
+      ]
+    },
+    {
+      "id": "report",
+      "kind": "fn",
+      "title": "产出建链报告（叙述层 + 证据层 + 完成包）",
+      "use": "genesis.report",
+      "trigger": [
+        {
+          "on": "signal.assert.passed"
+        },
+        {
+          "on": "signal.assert.failed"
+        }
+      ],
+      "in": {
+        "approved": "$.written.written",
+        "completionPackage": {
+          "scope": "从自然语言需求编译出结构合法、可终止的 JSON 触发链",
+          "changeScope": "本次运行实际触达的节点与产物见 artifacts；未触达的分支不在本次交付范围内。",
+          "designRationale": "四层治理骨架：战略层由链头 intent/principle/acceptance/redlines/boundaries 固定；建制层由 trigger 拓扑 + budget + maxRuns 约束；战术层 AI 在边界内执行，越界经 clarify 交回人；裁决层由 redlines / review / evidence / assert 四道机器门判定，不接受 AI 自证。",
+          "risks": [],
+          "acceptanceCommand": "=\"node src/cli.js run sys.genesis --goal \\\"\" + coalesce($.intake.goal, \"\") + \"\\\"\"",
+          "verificationResults": "$.evidence.gates",
+          "regressionCompatibility": "链头 regressionTests 共 0 条；治理基线注入只新增护栏与证据节点、不改变原有阶段语义，回归口径不变。",
+          "issuesAndMethods": "$.assert.issues",
+          "openItems": [],
+          "nextSteps": [
+            "按 review 指出的 weaknesses 逐条修复后重跑",
+            "若本次有未完成项（openItems），先补足再进入下一阶段",
+            "用 gen.chain-governance 定期审查本链治理覆盖度"
+          ],
+          "artifactsHash": "=$.evidence.hashes",
+          "narrative": {
+            "layer": "叙述层（AI 写给人看）",
+            "note": "以下由模型总结，供人快速决策：干了什么、卡在哪、需要你定什么。可读性优先，不作为验收依据。",
+            "summary": "见 answer"
+          },
+          "evidence": {
+            "layer": "证据层（机器统计，不可编造）",
+            "note": "以下全部由 fn 节点确定性生成，模型无法改写；验收以本层为准。",
+            "runId": "$.evidence.runId",
+            "command": "$.evidence.command",
+            "gates": "$.evidence.gates",
+            "hashes": "=$.evidence.hashes",
+            "assertions": "$.assert"
+          }
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "genesis.done",
+        "chain.end"
+      ]
+    }
+  ],
+  "analysis": {
+    "source": "全网搜索4主题+聚类/交叉核实/可落地性/6链映射",
+    "report": "AI产品实战分析-20260823.md",
+    "addedAt": "2026-08-23",
+    "points": {
+      "ajtc_chain_gen": "生成的链必须带eval/验收门(demo≠生产坑);成本失控坑→生成链默认走本地Ollama降级+节点级cache:true;单位经济→生成链文档标注预估推理成本",
+      "caveat": "本地Ollama能否稳定承载全部节点待落地(当前机器未装)"
+    }
+  }
+}

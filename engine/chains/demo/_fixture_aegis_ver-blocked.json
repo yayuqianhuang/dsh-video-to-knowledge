@@ -1,0 +1,19 @@
+{
+  "scenario": "negative-verification",
+  "note": "删除目标是源码退役（code-retirement，可放行），但完成 claim 只有 C 级且声称已发布",
+  "targets": [
+    {
+      "path": "src/legacy/oldTrigger.js",
+      "note": "源码退役（code-retirement），无需授权"
+    }
+  ],
+  "claims": [
+    {
+      "action": "已修复登录 bug 并发布上线",
+      "check": "（未执行任何验证）",
+      "result": "（略）",
+      "confidence": "C"
+    }
+  ],
+  "userConfirmation": "确认"
+}

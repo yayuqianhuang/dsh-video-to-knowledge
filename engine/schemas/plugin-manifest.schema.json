@@ -1,0 +1,99 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ajtc.internal/schemas/plugin-manifest.schema.json",
+  "title": "AJTC Trigger-Chain Plugin Manifest",
+  "description": "Machine-validatable manifest for an AJTC trigger chain treated as a plugin unit. Superset of the existing chain frontmatter; new fields (trigger/dependencies/provides/pluginForm/contract) are opt-in and auto-inferred when absent (see docs/trigger-chain-plugin-standard.md §3, §9).",
+  "type": "object",
+  "required": ["name", "version", "tier", "trigger"],
+  "additionalProperties": true,
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "description": "Unique plugin id, equals the chain's `id`."
+    },
+    "title": { "type": "string" },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "AJTC v主.次.修 (semver-compatible, 3 numeric segments)."
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["infra", "combat", "storyteller", "study", "tool", "observability", "utility", "reference"],
+      "description": "Priority layer (see spec §6.1). Must not be null/absent."
+    },
+    "pluginForm": {
+      "type": "string",
+      "enum": ["service", "pipeline", "meta", "observer", "reference"],
+      "description": "Plugin shape (see spec §8.1). Inferred from tier/name when absent."
+    },
+    "intent": { "type": "string" },
+    "principle": { "type": "array", "items": { "type": "string" } },
+    "acceptance": { "type": "array", "items": { "type": "string" } },
+    "redlines": { "type": "array", "items": { "type": "string" } },
+    "boundaries": {
+      "type": "object",
+      "properties": {
+        "owns": { "type": ["string", "array"] },
+        "notOwns": { "type": "array", "items": { "type": "string" } },
+        "escalateTo": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "maxSteps": { "type": "integer" },
+        "maxLlmCalls": { "type": "integer" },
+        "maxTokens": { "type": "integer" },
+        "maxWallMs": { "type": "integer" },
+        "maxNodeRuns": { "type": "integer" }
+      }
+    },
+    "trigger": {
+      "type": "object",
+      "required": ["on"],
+      "additionalProperties": false,
+      "properties": {
+        "on": {
+          "type": "string",
+          "pattern": "^(chain\\.start|signal\\.[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*)$",
+          "description": "Entry activation signal. `chain.start` = invoked directly; `signal.x.y` = activated by upstream signal."
+        },
+        "when": {
+          "type": ["string", "null"],
+          "description": "Optional bare-expression guard. NOTE: must NOT use {{ }} render wrapping (engine evaluates as expression)."
+        },
+        "entryNode": { "type": ["string", "null"], "description": "Id of the plugin's entry node." }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+      "description": "inject: ids of plugins this plugin requires ACTIVE before it may load."
+    },
+    "provides": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+      "description": "Capabilities this plugin exposes for others to consume by name."
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Alias of `provides`."
+    },
+    "contract": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "description": "Outbound output contract summary (aggregated from the deliver node's `expect`)."
+    },
+    "regressionTests": { "type": "array" },
+    "_source": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Provenance metadata added by the generator (not part of the runtime contract)."
+    }
+  }
+}

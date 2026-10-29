@@ -1,0 +1,190 @@
+{
+  "schema": "ajtc-governance-model/v0.2",
+  "version": "0.2.0",
+  "model": "xia-dynasty",
+  "generatedAt": "2026-09-29",
+  "ownerChain": "gen.chain-governance",
+  "status": "draft-落地第0步",
+  "principle": "概念未确切前不动手（物理必修第一册·致同学们）。本文件是夏制治理模型的术语唯一权威源，术语有歧义时以本文件为准。",
+  "sovereign": {
+    "definition": "不可下放的主权核心，AI 不得单方改写",
+    "members": [
+      "chains/governance/iron-laws.json",
+      "chains/governance/ajtc-creed.md",
+      "gen.chain-governance"
+    ]
+  },
+  "terms": [
+    {
+      "id": "T-01",
+      "term": "内服",
+      "key": "inner",
+      "definition": "改一处即全局生效的资产集合。主权不可下放，变更必须 100% 走 SOP + lint + 回归。",
+      "test": "修改该资产是否改变所有触发链的执行语义？是 → inner。",
+      "members": ["src/engine/*", "src/governance/*", "链契约字段 interfaces/namingConvention/evidenceManifestSpec/redlines", "iron-laws.json", "ajtc-creed.md", "凭证与端点(兵符)", "回归基线"],
+      "sourceRef": "思政选必1 第二课（主权不可讨论/中央管军事外交）PDF p19,p21"
+    },
+    {
+      "id": "T-02",
+      "term": "外服",
+      "key": "outer",
+      "definition": "保留自身组织与首领，仅通过朝贡契约受中枢约束的资产集合。",
+      "test": "有 owner 且能独立变更而不改变引擎语义？是 → outer。",
+      "controlRopes": ["tributeContract 朝贡", "hostage 质子", "conscription 从征", "degradeNotDelete 叛则降级不删"],
+      "sourceRef": "纲要上 第1课夏『控部族间接统治』课本 p5；历史选必1 第11课土司 PDF p70"
+    },
+    {
+      "id": "T-03",
+      "term": "荒服",
+      "key": "wild",
+      "definition": "系统接触但未登记、不朝贡的资产集合。不朝贡不等于不存在——出事一样波及内服。",
+      "test": "无 contact 且无 boundary 记录？是 → wild。",
+      "minimumRequirement": "被看见：必须有 contact（被谁接触过）+ boundary（gitRoot/mode/owner）",
+      "sourceRef": "历史选必1 第11课羁縻/土司/改土归流 PDF p68,p70"
+    },
+    {
+      "id": "T-04",
+      "term": "朝贡",
+      "key": "tributeContract",
+      "definition": "外服向中枢定期上报的契约项：lint errors:0、版本号只增、frontmatter 字段完整、health score。属政治臣服维度，与财政无关。",
+      "notToConfuseWith": "T-09 贡赋（财政账目维度）。两者中文都含『贡』，朝贡=契约上报，贡赋=资源计量。",
+      "sourceRef": "历史选必1 第11课『按时向朝廷进贡土物，接受朝廷征调军兵』PDF p70"
+    },
+    {
+      "id": "T-05",
+      "term": "质子",
+      "key": "hostage",
+      "definition": "资产 hash 登记进台账形成的不可篡改留痕，用于事后验证资产未被偷换。",
+      "field": "asset-catalog.assets[].hash"
+    },
+    {
+      "id": "T-06",
+      "term": "从征",
+      "key": "conscription",
+      "definition": "外服被调用时须提供的契约：expect schema + evidence 产出。",
+      "field": "节点 expect / evidenceManifest"
+    },
+    {
+      "id": "T-07",
+      "term": "兵符",
+      "key": "tally",
+      "definition": "决定系统能否执行某动作的权力凭证。三分：左符持有 / 右符核验 / 合符生效，两符匹配才准执行。",
+      "threeParts": {
+        "leftHold": ".env (AJTC_BASE_URL/AJTC_API_KEY/AJTC_MODEL)、~/.workbuddy/models.json、src/adapters/*",
+        "rightVerify": "src/engine/security-fns.js、rights-fns.js、gitsync-fns.js",
+        "uniteEffect": "git push / 删除 / 联网写 / 付费 API 调用"
+      },
+      "constraint": "君权非绝对——兵符使用须留痕可审计",
+      "sourceRef": "历史选必1 第1课『印称为玺』+『君主的权力不是绝对的』PDF p8；思政必修3 第四课国家职能 PDF p48"
+    },
+    {
+      "id": "T-08",
+      "term": "合符",
+      "key": "uniteTally",
+      "definition": "持有符与核验符双方匹配后动作才被允许执行的状态。未合符的动作一律拒绝。",
+      "currentCoverage": "部分（safe-delete 拦截已机械化；git 边界核实已有；联网写与付费调用未覆盖）"
+    },
+    {
+      "id": "T-09",
+      "term": "贡赋",
+      "key": "fiscalLedger",
+      "definition": "token / 预算 / 调用配额 / 存储的国家财政账目。属资源计量维度，与政治臣服无关。",
+      "notToConfuseWith": "T-04 朝贡（契约上报维度）。",
+      "threeBooks": {
+        "huangce": "黄册（人口）：asset-catalog 资产台账",
+        "yulin": "鱼鳞图册（田亩）：content/ 数据资产与存储占用",
+        "kuaiji": "会计录（收支）：token 按链/skill/run 归集"
+      },
+      "precondition": "先户籍后赋役——台账未补全前不得谈计量",
+      "sourceRef": "历史选必1 第六单元『户籍的编制与管理……既保证赋役征发』PDF p103；思政必修3 对内职能『促进社会发展』PDF p48"
+    },
+    {
+      "id": "T-10",
+      "term": "羁縻",
+      "key": "jimi",
+      "definition": "荒服处置第一档：只登记存在、边界、首领，不强制契约。",
+      "sourceRef": "历史选必1『都督府都督、羁縻州刺史由各民族首领担任……上统于中央』PDF p68"
+    },
+    {
+      "id": "T-11",
+      "term": "土司",
+      "key": "tusi",
+      "definition": "荒服处置第二档（升格）：中枢册封 owner + 按时进贡 + 接受征调。成熟后升为外服。",
+      "sourceRef": "历史选必1『卫所和土司官员由各族酋长世袭任职……按时向朝廷进贡土物，接受朝廷征调军兵』PDF p70"
+    },
+    {
+      "id": "T-12",
+      "term": "改土归流",
+      "key": "guiliu",
+      "definition": "荒服处置第三档（收权）：废除自治，派流官纳入内服直辖，有任期。用于高风险荒服。",
+      "sourceRef": "历史选必1『废除世袭土官，选派有任期的流官进行管理』PDF p70"
+    },
+    {
+      "id": "T-13",
+      "term": "tier",
+      "key": "tier",
+      "definition": "资产的三圈层归属字段，取值 inner | outer | wild。与 kind 构成交叉分类的两个维度。",
+      "methodology": "化学·交叉分类法（必修第一册 PDF p12）：同一资产从组成与阴离子两个角度分类"
+    },
+    {
+      "id": "T-14",
+      "term": "kind",
+      "key": "kind",
+      "definition": "资产的类型维度。v1 仅 algorithm/model/config 三类；v2 扩至 12 类。",
+      "v2Kinds": ["algorithm", "model", "config", "chain", "skill", "role", "webinfo", "file", "credential", "endpoint", "baseline", "repo"]
+    },
+    {
+      "id": "T-15",
+      "term": "contact",
+      "key": "contact",
+      "definition": "荒服资产的接触记录：被哪条链 / 哪个 skill 接触过。荒服最低登记要求之一。"
+    },
+    {
+      "id": "T-16",
+      "term": "boundary",
+      "key": "boundary",
+      "definition": "荒服资产的边界声明：gitRoot / mode(read-only|read-write) / owner。荒服最低登记要求之一。"
+    }
+  ],
+  "centralOffices": {
+    "administration": {
+      "duty": "籍册登记与路由（户部）",
+      "assets": ["chains/governance/chain-owners.json", "chains/core/asset-catalog.json", "chains/core/asset.rights-registry.json", "chains/core/code-asset-registry.json"],
+      "laws": ["L-GOV-022", "L-GOV-023", "L-GOV-024", "L-GOV-025"],
+      "extraDuty": "贡赋会计录（v0.2 新增）"
+    },
+    "military": {
+      "duty": "征伐熔断与兵符直辖",
+      "assets": ["src/engine/budget.js", "src/engine/security-fns.js", "src/engine/rights-fns.js", "src/engine/gitsync-fns.js"],
+      "laws": ["L-GOV-002", "L-GOV-009", "L-GOV-015"],
+      "extraDuty": "兵符三分与合符核验（v0.2 新增）"
+    },
+    "judiciary": {
+      "duty": "断案判罚与回炉",
+      "assets": ["src/governance/lint.js", "五道机器门", "revise 节点"],
+      "laws": ["L-GOV-004", "L-GOV-012"]
+    },
+    "religion": {
+      "duty": "合法性与证据留存",
+      "assets": ["redlines", "reviewRubricMeta.rubricImmutable", "evidenceManifest", "ajtc-creed.md"],
+      "laws": ["L-GOV-000", "L-GOV-001"]
+    }
+  },
+  "methodology": [
+    { "id": "M-01", "name": "分类法（树状+交叉）", "from": "化学必修第一册 PDF p10,p12", "use": "先分类再治理；kind 与 tier 双维度打标" },
+    { "id": "M-02", "name": "理想化模型（质点）", "from": "物理必修第一册 第一章", "use": "资产建模只留治理属性，内容细节不入库" },
+    { "id": "M-03", "name": "控制变量法", "from": "物理必修第一册 PDF p93", "use": "每轮只改一个变量，其余冻结" },
+    { "id": "M-04", "name": "共点力的平衡", "from": "物理必修第一册 第三章第5节", "use": "安全×效率×合法三角，合力为零" },
+    { "id": "M-05", "name": "氧化还原电子守恒", "from": "化学必修第一册 PDF p29", "use": "治理动作成对记账，账不平即审计失败" },
+    { "id": "M-06", "name": "概念先确切", "from": "物理必修第一册 致同学们 PDF p6", "use": "第0步必须是术语表，不是动手" }
+  ],
+  "roadmap": [
+    { "step": 0, "variable": "术语", "action": "写 governance-model.json 术语表", "done": true },
+    { "step": 1, "variable": "分类", "action": "asset-catalog-collect-v2.js 扩 kind 至 12 类 + tier 打标，输出到 asset-catalog-v2.json", "done": false },
+    { "step": 2, "variable": "荒服", "action": "建 wild-register.json，登记 7 个嵌套子仓 + 外部仓", "done": false },
+    { "step": 3, "variable": "兵符", "action": "建 tally-registry.json；处置 .env 失效兵符", "done": false },
+    { "step": 4, "variable": "贡赋", "action": "建会计录，token 按链/skill/run 归集", "done": false },
+    { "step": 5, "variable": "口径", "action": "asset-catalog-collect.js 排除 node_modules（8291→17）", "done": false }
+  ],
+  "knownGaps": ["G1 skill/role/webinfo/file 未登记", "G2 网络信息无强制核实门", "G3 判例库分散", "G4 多数链无 evidenceManifest", "G5 外服无统一健康分"]
+}

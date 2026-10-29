@@ -1,0 +1,393 @@
+{
+  "id": "gen.video-to-knowledge.prepare",
+  "title": "视频知识卡 · 素材准备子链",
+  "version": "0.1.0",
+  "tier": "infra",
+  "intent": "接收 {url, lang}，完成「抓元数据 → 取字幕（三级回退）→ 脚本清洗 → 分块编译 → 全局综述」整条素材准备链路，产出 $.card（含 files[]）。由主链 gen.video-to-knowledge 的 prepare 节点以 kind:chain 调用，属运行时支撑，不需要自然语言入口。",
+  "principle": [
+    "时间戳只来自字幕/ASR 原始数据，LLM 不得生成或改写。",
+    "字幕三级回退：平台字幕 →（云端 ASR，默认关）→ 本地 faster-whisper；覆盖率 ≥60% 才算数，否则判「假残缺」降级。",
+    "依赖缺失、登录失效、字幕缺失，一律早停（烧 token 之前）。",
+    "外部动作全部经 agentStep 暴露 visible 心跳，禁止黑箱批处理。",
+    "SESSDATA 仅注入 yt-dlp 子进程 env，绝不进黑板 / LLM 上下文 / 日志（D3/FR-14）。",
+    "证据由脚本产出，模型只写叙述层；evidence 可复算。"
+  ],
+  "acceptance": [
+    "产出 $.meta（含 durationSec）与 $.transcript（含 coveredSec/segmentCount）",
+    "字幕覆盖率 <60% 或段数不足 → transcript.fail → 早停，不产出空卡片",
+    "清洗后产出 clean.jsonl + chunks[]，时间戳单调递增",
+    "分块编译每个 [mm:ss] 均命中该块段表白名单，伪造条目剔除并计入 dropped",
+    "产出 $.card 含 files[]、summary、timeline，正文带 [mm:ss] 锚点与 source_url#t=秒 深链"
+  ],
+  "boundaries": {
+    "owns": "素材准备：抓元数据 / 取字幕 / 清洗 / 分块编译 / 全局综述。",
+    "notOwns": [
+      "环境自检与凭证获取（主链 probeEnv / getCredential 负责）",
+      "质量门 / 查重 / 落盘 / 核验（主链负责）",
+      "向量索引 / 检索 / 重排（D9 已移交 WorkBuddy 工作台）"
+    ]
+  },
+  "interfaces": {
+    "redlines": "in: $.input{url,lang}；emit redlines.pass/redlines.fail",
+    "fetchMeta": "in: $.input.url；out: $.meta；emit meta.ready",
+    "acquireTranscript": "in: $.meta；out: $.transcript；emit transcript.ready",
+    "transcriptGate": "in: $.transcript + $.meta；emit transcript.ok/transcript.fail",
+    "prepareBail": "in: 失败信号；out: $.output；halt",
+    "cleanTranscript": "in: $.transcript；out: $.clean（含 chunks[]）；emit clean.ready",
+    "compileLoop": "map over $.clean.chunks → 子链 gen.video-to-knowledge.chunk；out: $.chunks；emit compile.done",
+    "synthesize": "in: $.chunks；out: $.card；emit card.ready",
+    "prepareDone": "in: $.card；out: $.output；halt"
+  },
+  "regressionTests": [
+    {
+      "id": "RT-VK-PREPARE-1",
+      "type": "happy",
+      "input": "{\"url\":\"https://www.bilibili.com/video/BV1xx411c7mD\",\"lang\":\"zh-CN\"}",
+      "expect": "抓到元数据与平台字幕 → 清洗 → 编译 → 产出 $.card（files 非空，[mm:ss] 齐全）",
+      "rationale": "有字幕视频的素材准备主路径"
+    },
+    {
+      "id": "RT-VK-PREPARE-2",
+      "type": "edge",
+      "input": "无字幕视频 + T3 关闭",
+      "expect": "NO_TRANSCRIPT → transcriptGate 判 fail → prepareBail 早停，不产出空卡片",
+      "rationale": "无字幕且关闭本地 ASR 必须早停，不得烧 token 编空卡片"
+    },
+    {
+      "id": "RT-VK-PREPARE-3",
+      "type": "negative",
+      "input": "字幕被限流降级（段数远少于 durationSec/120）",
+      "expect": "覆盖率双校验不达标 → 判「假残缺」→ transcript.fail → 早停",
+      "rationale": "限流返回的稀疏字幕必须被识别，不能当正常字幕编译"
+    }
+  ],
+  "budget": {
+    "maxSteps": 120,
+    "maxLlmCalls": 12,
+    "maxTokens": 140000,
+    "maxWallMs": 1500000,
+    "maxNodeRuns": 3
+  },
+  "nodes": [
+    {
+      "id": "redlines",
+      "kind": "fn",
+      "use": "redlines",
+      "title": "红线门 / 意图护栏（SSOT: chains/governance/iron-laws.json）",
+      "trigger": [
+        {
+          "on": "chain.start"
+        }
+      ],
+      "in": {
+        "boundaryKeywords": [
+          "下载并转存音视频",
+          "分发受版权保护的媒体文件",
+          "把 SESSDATA 写入黑板/日志/git",
+          "编造时间戳"
+        ]
+      },
+      "out": "$.redlines",
+      "emit": [
+        "redlines.pass"
+      ],
+      "declares": [
+        "redlines.pass",
+        "redlines.fail"
+      ],
+      "maxRuns": 2
+    },
+    {
+      "id": "fetchMeta",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "抓取元数据：yt-dlp -J",
+      "trigger": [
+        {
+          "on": "signal.redlines.pass"
+        }
+      ],
+      "in": {
+        "action": "运行 `python scripts/vk_chain.py meta --url <$.input.url>`：内部用 yt-dlp --print 取标题/上传者/各分 P 时长并算累积偏移（offsetSec），落盘 runs/<videoId>/meta.json，同一 JSON 打到 stdout 作为 $.meta={platform,videoId,title,uploader,durationSec,publishedAt,partCount,parts[],metaPath}。幂等：meta.json 已存在则复用（--refresh 强制重抓）。B 站需登录 cookie，仅经 BILI_COOKIES 子进程 env 注入，绝不写黑板/日志。重试上限 2 次，仍失败 → FETCH_FAILED。",
+        "visible": "📄 [fetchMeta] 抓取视频元数据（$.input.url）…",
+        "resultPath": "$.meta"
+      },
+      "out": "$.meta",
+      "maxRuns": 2,
+      "emit": [
+        "meta.ready"
+      ],
+      "declares": [
+        "meta.ready"
+      ],
+      "writes": [
+        "$.meta"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "meta",
+          "--url",
+          "${$.input.url}"
+        ]
+      }
+    },
+    {
+      "id": "acquireTranscript",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "获取字幕：平台优先 → 本地 ASR 兜底",
+      "trigger": [
+        {
+          "on": "signal.meta.ready"
+        }
+      ],
+      "in": {
+        "action": "运行 `python scripts/vk_chain.py transcript --url <$.input.url>`：B 站走 `yt-dlp --cookies <cookie文件> --write-subs --write-auto-subs --sub-langs ai-zh,zh-Hans,zh-CN --skip-download`（**只取字幕，不下载视频**），再把各分 P 的 SRT 按 meta.offsetSec 平移到整视频时间轴并合并成 runs/<videoId>/transcript.jsonl；stdout 输出 $.transcript={source,lang,segmentsPath,segmentCount,coveredSec,firstSec,lastSec,durationSec,partCount}。幂等：transcript.jsonl 已存在则复用（--refresh 强制重抓）。cookie 仅经 BILI_COOKIES 子进程 env 注入。取不到字幕 → 退出码 3（NO_TRANSCRIPT）。",
+        "visible": "🎧 [acquireTranscript] 拉取字幕（平台优先；无字幕则本地转录，预计 $.meta.durationSec 秒音频）…",
+        "resultPath": "$.transcript"
+      },
+      "out": "$.transcript",
+      "maxRuns": 2,
+      "emit": [
+        "transcript.ready"
+      ],
+      "declares": [
+        "transcript.ready"
+      ],
+      "writes": [
+        "$.transcript"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "transcript",
+          "--url",
+          "${$.input.url}"
+        ],
+        "env": {
+          "BILI_COOKIES": "${$.cred.cookiesPath}"
+        }
+      }
+    },
+    {
+      "id": "transcriptGate",
+      "kind": "gate",
+      "title": "字幕校验门 / 评审门（verify 覆盖率与段数）",
+      "trigger": [
+        {
+          "on": "signal.transcript.ready"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.meta.durationSec > 0 && $.transcript.segmentCount > 0 && $.transcript.coveredSec / $.meta.durationSec >= 0.6",
+          "emit": "transcript.ok",
+          "label": "字幕可用",
+          "reason": "段落数 > 0 且时间轴覆盖 ≥ 60% 时长"
+        }
+      ],
+      "out": "$.transcriptCheck",
+      "default": "transcript.fail",
+      "declares": [
+        "transcript.ok",
+        "transcript.fail"
+      ]
+    },
+    {
+      "id": "prepareBail",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "素材准备失败收口（0 副作用）",
+      "trigger": [
+        {
+          "on": "signal.transcript.fail"
+        },
+        {
+          "on": "signal.redlines.fail"
+        },
+        {
+          "on": "signal.clean.failed"
+        }
+      ],
+      "in": {
+        "answer": null,
+        "quality": {
+          "aborted": true,
+          "reason": "素材准备阶段失败（transcript.fail / redlines.fail / clean.failed），未进入编译与落盘"
+        },
+        "completionPackage": {
+          "scope": "素材准备（抓元数据 → 取字幕）",
+          "narrative": {
+            "summary": "素材准备中止：字幕不可用或红线命中",
+            "note": "叙述层（AI 写）：面向人说明卡在哪、缺什么、需要你做什么"
+          },
+          "evidence": {
+            "note": "证据层（机器出）：meta 与 transcript 的真实计数，模型无法改写",
+            "meta": "=$.meta",
+            "transcript": "=$.transcript"
+          }
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "prepareBail.done",
+        "chain.end"
+      ]
+    },
+    {
+      "id": "cleanTranscript",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "脚本清洗 + 脱敏，落盘 clean.jsonl",
+      "trigger": [
+        {
+          "on": "signal.transcript.ok"
+        }
+      ],
+      "in": {
+        "action": "运行 `python scripts/clean_transcript.py --input <$.transcript.segmentsPath> --output runs/<videoId>/clean.jsonl --stats runs/<videoId>/clean.stats.json`：去口癖词表命中统计、连续重复句去重、单段 <4 字合并到相邻段；时间戳原样保留且单调递增、禁止重排；手机号/身份证/邮箱/银行卡正则替换为 [已脱敏]，命中数写 clean.stats.json 的 piiHits。按 ~3000 字切块，stdout 输出 $.clean={chars,cleanPath,statsPath,chunks[]}。清洗后总字数 < 300 → 退出码 2（TRANSCRIPT_TOO_SHORT），emit clean.failed 终止。",
+        "visible": "🧹 [cleanTranscript] 脚本清洗 + 脱敏（去口癖 / 去重 / 断句 / PII 替换）…",
+        "resultPath": "$.clean"
+      },
+      "out": "$.clean",
+      "maxRuns": 3,
+      "emit": [
+        "clean.ready"
+      ],
+      "declares": [
+        "clean.ready"
+      ],
+      "writes": [
+        "$.clean"
+      ],
+      "onError": {
+        "emit": [
+          "clean.failed"
+        ]
+      },
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/clean_transcript.py",
+        "cwd": "${workDir}",
+        "args": [
+          "--input",
+          "${$.transcript.segmentsPath}",
+          "--output",
+          "runs/${$.meta.videoId}/clean.jsonl",
+          "--stats",
+          "runs/${$.meta.videoId}/clean.stats.json"
+        ]
+      }
+    },
+    {
+      "id": "compileLoop",
+      "kind": "map",
+      "title": "分块编译：逐块出要点（子链）",
+      "trigger": [
+        {
+          "on": "signal.clean.ready"
+        }
+      ],
+      "over": "$.clean.chunks",
+      "use": "gen.video-to-knowledge.chunk",
+      "limit": 20,
+      "onItemError": "continue",
+      "out": "$.chunks",
+      "emit": [
+        "compile.done"
+      ],
+      "declares": [
+        "compile.done",
+        "compile.partial"
+      ]
+    },
+    {
+      "id": "synthesize",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "全局综述 + 组装卡片（LLM）",
+      "trigger": [
+        {
+          "on": "signal.compile.done"
+        }
+      ],
+      "in": {
+        "action": "前置：agent/LLM 已按 by_p/pNN.txt 写好卡片**正文**到 cards/card-<videoId>-pNN.md（只写正文，frontmatter 由脚本注入）。本节点运行 `python scripts/vk_chain.py --out runs/<videoId>/card.json cards --video-id <videoId> --cards-dir cards`：组装 $.card={files:[{fileName,title,content,contentHash,partIndex,totalParts}],summary,timeline,stats}，并把同一对象落盘 runs/<videoId>/card.json 供后续 quality/outline 复用。长视频（>40min）按 D6 每分 P 一张卡、共享 video_id；storage_mode 默认 refined。卡片正文必须带 [mm:ss] 锚点 + source_url#t=秒 深链（D9 回跳）。",
+        "visible": "🧠 [synthesize] 全局综述 + 组装卡片…",
+        "resultPath": "$.card"
+      },
+      "out": "$.card",
+      "maxRuns": 2,
+      "emit": [
+        "card.ready"
+      ],
+      "declares": [
+        "card.ready"
+      ],
+      "writes": [
+        "$.card"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "--out",
+          "runs/${$.meta.videoId}/card.json",
+          "cards",
+          "--video-id",
+          "${$.meta.videoId}",
+          "--cards-dir",
+          "cards"
+        ]
+      }
+    },
+    {
+      "id": "prepareDone",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "素材准备完成收口",
+      "trigger": [
+        {
+          "on": "signal.card.ready"
+        }
+      ],
+      "in": {
+        "answer": "=$.card",
+        "quality": {
+          "ok": true
+        },
+        "completionPackage": {
+          "scope": "素材准备：抓元数据 → 取字幕 → 清洗 → 分块编译 → 综述",
+          "narrative": {
+            "summary": "= \"素材准备完成：产出 \" + $.card.files.length + \" 张卡片，字幕来源 \" + $.transcript.source",
+            "note": "叙述层（AI 写）：面向人说明素材从哪来、产出了什么"
+          },
+          "evidence": {
+            "note": "证据层（机器出）：以下由 agentStep 节点（脚本计数）生成，模型无法改写",
+            "meta": "=$.meta",
+            "transcript": "=$.transcript",
+            "clean": "=$.clean",
+            "chunks": "=$.chunks",
+            "card": "=$.card"
+          }
+        }
+      },
+      "out": "$.output",
+      "declares": [
+        "prepareDone.done",
+        "chain.end"
+      ],
+      "emit": [
+        "chain.end"
+      ]
+    }
+  ],
+  "creed": "road"
+}

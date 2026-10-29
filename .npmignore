@@ -1,0 +1,12 @@
+# .npmignore —— 兜底排除（files 白名单之外，再排一次运行时垃圾）
+__pycache__/
+*.pyc
+*.pyo
+.runtime/
+run-shadow/
+scripts/
+.github/
+PUBLISH.md
+cookies.txt
+bili-cookies.txt
+*.tgz

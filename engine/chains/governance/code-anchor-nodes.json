@@ -1,0 +1,66 @@
+{
+  "id": "code-anchor-nodes",
+  "title": "代码治理锚点节点模板（代码强相关触发链自动注入）",
+  "version": "1.0.0",
+  "schema": "code-anchor-nodes/v1",
+  "description": "当一条触发链的 intent 命中代码项目关键词（或显式 autoCodeNodes）时，gen.chain-extend 自动向该链注入以下三节点（源自 gen.code-governance 子链三支柱：代码优化 / bug修复与调试 / 代码文档生成）。节点 id 固定，便于幂等守卫跳过。三节点顺序接驳：codeOptimize → bugFix → docGen。",
+  "source": "gen.code-governance",
+  "detectionKeywords": [
+    "code", "源码", "source", "repo", "仓库", "函数", "类", "class",
+    "bug", "性能", "performance", "重构", "refactor", "文档", "documentation",
+    "注释", "优化", "optimize", "调试", "debug", "代码治理", "代码项目"
+  ],
+  "nodes": [
+    {
+      "id": "codeOptimize",
+      "kind": "llm",
+      "title": "代码优化（lesson1 支柱1：自动归纳优化方案资产）",
+      "role": "code-optimizer",
+      "trigger": [{ "on": "signal.<anchor>" }],
+      "prompt": {
+        "system": "你是代码优化单元（lesson1 支柱1）。只输出统一信封 JSON。基于提供的代码上下文，对性能瓶颈给出 before→after 代码、理由、量化收益预估（延迟/QPS/内存）。按 lesson1 promptExpand 注入性能分析视角与明确目标。不臆造不存在的优化。",
+        "user": "【项目】{{$.input.project}}\n【codeContext】{{$.input.codeContext}}\n输出 optimizationPlan:[{file,symbol,before,after,reason,quantifiedGain}]。"
+      },
+      "expect": { "type": "object", "required": ["optimizationPlan"], "properties": { "optimizationPlan": { "type": "array" } } },
+      "out": "$.codeOptimize",
+      "emit": ["code.optimize.done"],
+      "declares": ["code.optimize.done", "code.optimize.failed"],
+      "assetKind": "optimization-plan",
+      "maxRuns": 2
+    },
+    {
+      "id": "bugFix",
+      "kind": "llm",
+      "title": "bug 修复与调试（lesson1 支柱2：排查措施沉淀）",
+      "role": "debugger",
+      "trigger": [{ "on": "signal.code.optimize.done" }],
+      "prompt": {
+        "system": "你是调试单元（lesson1 支柱2）。只输出统一信封 JSON。对 bug 候选给 症状→根因→排查步骤→修复 diff→防回归点。按 lesson1 promptExpand 注入复现路径/堆栈/排查假设/自测。",
+        "user": "【codeContext】{{$.input.codeContext}}\n【optimizationPlan】{{$.codeOptimize.optimizationPlan}}\n输出 debugPlan:[{file,symbol,symptom,rootCause,steps,fixDiff,regressionGuard}]。"
+      },
+      "expect": { "type": "object", "required": ["debugPlan"], "properties": { "debugPlan": { "type": "array" } } },
+      "out": "$.bugFix",
+      "emit": ["code.debug.done"],
+      "declares": ["code.debug.done", "code.debug.failed"],
+      "assetKind": "debug-measure",
+      "maxRuns": 2
+    },
+    {
+      "id": "docGen",
+      "kind": "llm",
+      "title": "代码文档生成（lesson1 支柱3：真实注释，禁臆造）",
+      "role": "doc-writer",
+      "trigger": [{ "on": "signal.code.debug.done" }],
+      "prompt": {
+        "system": "你是文档生成单元（lesson1 支柱3）。只输出统一信封 JSON。对涉及符号生成注释（JSDoc/JavaDoc 风格），只描述真实实现、含参数/返回值/异常/示例，禁止臆造行为。",
+        "user": "【codeContext】{{$.input.codeContext}}\n输出 docPlan:[{file,symbol,doc,style}]。"
+      },
+      "expect": { "type": "object", "required": ["docPlan"], "properties": { "docPlan": { "type": "array" } } },
+      "out": "$.docGen",
+      "emit": ["code.doc.done"],
+      "declares": ["code.doc.done", "code.doc.failed"],
+      "assetKind": "doc-comment",
+      "maxRuns": 2
+    }
+  ]
+}

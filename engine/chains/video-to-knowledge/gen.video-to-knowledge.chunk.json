@@ -1,0 +1,263 @@
+{
+  "id": "gen.video-to-knowledge.chunk",
+  "title": "视频知识卡 · 单块编译子链",
+  "version": "0.1.0",
+  "tier": "infra",
+  "intent": "把一个清洗后的文本块（~3000 字）编译成结构化要点：要点、关键概念、可执行步骤（若为教程）、该块时间范围；并做时间戳白名单断言，剔除不在该块段表内的伪造时间戳。",
+  "principle": [
+    "时间戳只来自该块段表的原始 startSec，LLM 不得生成或改写（防幻觉的机械闸门）。",
+    "LLM 输出的每个 [mm:ss] 必须存在于该块段表白名单；不存在则剔除该条并计入 dropped。",
+    "外部动作全部经 agentStep 暴露 visible 心跳，禁止黑箱批处理。",
+    "证据由脚本产出，模型只写叙述层；evidence 可复算。"
+  ],
+  "acceptance": [
+    "输出含 {points[], concepts[], steps[], dropped, timeRange}",
+    "所有保留的 [mm:ss] 均能在该块段表中找到对应 startSec",
+    "伪造时间戳被剔除且 dropped>0 时其余部分仍正常产出",
+    "单块 LLM 调用 = 1"
+  ],
+  "boundaries": {
+    "owns": "单块的 LLM 编译 + 时间戳白名单断言。",
+    "notOwns": [
+      "跨块全局综述（主链 synthesize 负责）",
+      "落盘（主链 uploadLoop 负责）",
+      "向量索引 / 检索 / 重排（D9 已移交 WorkBuddy 工作台）"
+    ]
+  },
+  "interfaces": {
+    "chunkIntake": "in: $.input.item{chunkIndex, charCount, segmentsPath}；out: $.chunk",
+    "redlines": "in: $.chunk；emit redlines.pass/redlines.fail",
+    "compileChunk": "in: $.chunk；out: $.chunk.compiled",
+    "assertTimestamps": "in: $.chunk.compiled；emit ts.clean/ts.trimmed/ts.empty",
+    "chunkOk": "in: $.chunk；out: $.output；halt（clean 或 trimmed）",
+    "chunkEmpty": "in: $.chunk；out: $.output；halt（无有效要点）"
+  },
+  "regressionTests": [
+    {
+      "id": "RT-VK-CHUNK-1",
+      "type": "happy",
+      "input": "{\"item\":{\"chunkIndex\":1,\"charCount\":2980,\"segmentsPath\":\"runs/BV1xx/clean.jsonl\"}}",
+      "expect": "产出 points/concepts/steps，dropped=0，走 ts.clean → chunkOk",
+      "rationale": "单块编译主路径"
+    },
+    {
+      "id": "RT-VK-CHUNK-2",
+      "type": "negative",
+      "input": "mock LLM 输出含段表外伪造时间戳",
+      "expect": "伪造条目被剔除，dropped>0，走 ts.trimmed → chunkOk",
+      "rationale": "白名单断言必须拦住幻觉时间戳"
+    },
+    {
+      "id": "RT-VK-CHUNK-3",
+      "type": "edge",
+      "input": "块内全部要点时间戳均不合法",
+      "expect": "全部剔除后 points 为空 → ts.empty → chunkEmpty 终止，不产出空要点卡片",
+      "rationale": "不得产出无有效出处的空卡片"
+    }
+  ],
+  "budget": {
+    "maxSteps": 20,
+    "maxLlmCalls": 1,
+    "maxTokens": 20000,
+    "maxWallMs": 300000,
+    "maxNodeRuns": 2
+  },
+  "nodes": [
+    {
+      "id": "chunkIntake",
+      "kind": "fn",
+      "use": "set",
+      "title": "归一化本块参数",
+      "trigger": [
+        {
+          "on": "chain.start"
+        }
+      ],
+      "in": {
+        "values": {
+          "chunkIndex": "=$.input.item.chunkIndex",
+          "charCount": "=$.input.item.charCount",
+          "segmentsPath": "=$.input.item.segmentsPath"
+        }
+      },
+      "out": "$.chunk",
+      "emit": [
+        "chunkIntake.done"
+      ],
+      "declares": [
+        "chunkIntake.done"
+      ]
+    },
+    {
+      "id": "redlines",
+      "kind": "fn",
+      "use": "redlines",
+      "title": "红线门 / 意图护栏（SSOT: chains/governance/iron-laws.json）",
+      "trigger": [
+        {
+          "on": "signal.chunkIntake.done"
+        }
+      ],
+      "in": {
+        "boundaryKeywords": [
+          "编造时间戳",
+          "生成时间戳",
+          "修改原始时间轴",
+          "删除段表条目"
+        ]
+      },
+      "out": "$.redlines",
+      "emit": [
+        "redlines.pass"
+      ],
+      "declares": [
+        "redlines.pass",
+        "redlines.fail"
+      ],
+      "maxRuns": 2
+    },
+    {
+      "id": "compileChunk",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "LLM 编译本块：要点 / 概念 / 步骤 / 时间范围",
+      "trigger": [
+        {
+          "on": "signal.redlines.pass"
+        }
+      ],
+      "in": {
+        "action": "读取 $.chunk.segmentsPath 的段表，对该块做 1 次 LLM 编译，产出 {points[], concepts[], steps[], timeRange:{startSec,endSec}}；每条要点/概念/步骤必须携带本块段表中真实存在的 [mm:ss] 锚点。产出 $.chunk.compiled，落盘 runs/<videoId>/chunks/chunk-<n>.json。",
+        "visible": "🧠 [compileChunk] 编译第 $.chunk.chunkIndex 块（$.chunk.charCount 字）…",
+        "resultPath": "$.chunk.compiled"
+      },
+      "out": "$.chunk.compiled",
+      "maxRuns": 2,
+      "emit": [
+        "compileChunk.done"
+      ],
+      "declares": [
+        "compileChunk.done"
+      ],
+      "writes": [
+        "$.chunk.compiled"
+      ]
+    },
+    {
+      "id": "assertTimestamps",
+      "kind": "gate",
+      "title": "时间戳白名单校验门 / 评审门（机器判定）",
+      "trigger": [
+        {
+          "on": "signal.compileChunk.done"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.chunk.compiled.dropped == 0",
+          "emit": "ts.clean",
+          "label": "无伪造时间戳",
+          "reason": "全部 [mm:ss] 均命中该块段表白名单"
+        },
+        {
+          "when": "$.chunk.compiled.dropped > 0 && $.chunk.compiled.points.length > 0",
+          "emit": "ts.trimmed",
+          "label": "剔除伪造条目后仍可用",
+          "reason": "dropped>0 但剩余有效要点非空，已剔除不合法时间戳"
+        }
+      ],
+      "out": "$.tsCheck",
+      "default": "ts.empty",
+      "declares": [
+        "ts.clean",
+        "ts.trimmed",
+        "ts.empty"
+      ]
+    },
+    {
+      "id": "chunkOk",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "汇总本块结果（可用）并终止子链",
+      "trigger": [
+        {
+          "on": "signal.ts.clean"
+        },
+        {
+          "on": "signal.ts.trimmed"
+        }
+      ],
+      "in": {
+        "answer": "=$.chunk.compiled",
+        "quality": {
+          "ok": true,
+          "dropped": "=$.chunk.compiled.dropped"
+        },
+        "completionPackage": {
+          "scope": "编译第 $.chunk.chunkIndex 块（$.chunk.charCount 字）",
+          "narrative": {
+            "summary": "= \"第 \" + $.chunk.chunkIndex + \" 块编译完成，有效要点 \" + $.chunk.compiled.points.length + \" 条，剔除 \" + $.chunk.compiled.dropped + \" 条\"",
+            "note": "叙述层（AI 写）：面向人说明本块产出了什么、剔除了什么"
+          },
+          "evidence": {
+            "note": "证据层（机器出）：以下由 agentStep 节点（脚本白名单比对）生成，模型无法改写",
+            "dropped": "=$.chunk.compiled.dropped",
+            "points": "=$.chunk.compiled.points",
+            "concepts": "=$.chunk.compiled.concepts",
+            "steps": "=$.chunk.compiled.steps",
+            "timeRange": "=$.chunk.compiled.timeRange"
+          }
+        }
+      },
+      "out": "$.output",
+      "declares": [
+        "chunkOk.done",
+        "chain.end"
+      ],
+      "emit": [
+        "chain.end"
+      ]
+    },
+    {
+      "id": "chunkEmpty",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "汇总本块结果（无有效要点）并终止子链",
+      "trigger": [
+        {
+          "on": "signal.ts.empty"
+        },
+        {
+          "on": "signal.redlines.fail"
+        }
+      ],
+      "in": {
+        "answer": null,
+        "quality": {
+          "ok": false,
+          "reason": "本块无有效要点（时间戳全部不合法或红线命中）"
+        },
+        "completionPackage": {
+          "scope": "编译第 $.chunk.chunkIndex 块（无有效产出）",
+          "narrative": {
+            "summary": "第 $.chunk.chunkIndex 块无有效要点，已终止",
+            "note": "叙述层（AI 写）：面向人说明本块为何无产出"
+          },
+          "evidence": {
+            "note": "证据层（机器出）：dropped 计数与红线命中项，模型无法改写",
+            "dropped": "=$.chunk.compiled.dropped"
+          }
+        }
+      },
+      "out": "$.output",
+      "declares": [
+        "chunkEmpty.done",
+        "chain.end"
+      ],
+      "emit": [
+        "chain.end"
+      ]
+    }
+  ],
+  "creed": "road"
+}

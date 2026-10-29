@@ -1,0 +1,26 @@
+{
+  "scenario": "positive-both-pass",
+  "note": "源码退役 + 可重建缓存（均放行），完成 claim 带 A 级证据与必填槽位",
+  "targets": [
+    {
+      "path": "src/legacy/oldTrigger.js",
+      "note": "源码退役"
+    },
+    {
+      "path": "/tmp/cache/build.cache",
+      "note": "可重建缓存（derived-state）"
+    }
+  ],
+  "claims": [
+    {
+      "action": "已删除 src/legacy/oldTrigger.js 并验证无残留引用",
+      "check": "grep -r oldTrigger src/ ; node -e \"require('./src/legacy/oldTrigger.js')\"",
+      "result": "exit 0，全树无残留引用",
+      "coveredScope": "src/ 全树",
+      "uncoveredScope": "无",
+      "residualRisk": "低",
+      "confidence": "A"
+    }
+  ],
+  "userConfirmation": "确认"
+}

@@ -1,0 +1,705 @@
+{
+  "id": "gen.video-to-knowledge",
+  "title": "视频链接转知识库（kb 文件夹落盘）",
+  "version": "0.1.0",
+  "tier": "tool",
+  "skills": [
+    {
+      "id": "video-to-knowledge",
+      "note": "本链驱动的执行技能"
+    }
+  ],
+  "vision": "把任意视频链接编译成带时间戳、可回跳、可复盘的 Markdown 知识卡片，幂等落盘到 kb/<collection>/ 知识库文件夹（检索/向量化/重排由 WorkBuddy 工作台承载，D9）。",
+  "intent": "接收 {url, kbPath, collection?, lang?, mode?}，经环境门、字幕三级回退、脚本清洗、分块编译、质量门、查重后，把卡片落盘到 kb/<collection>/，仅核验文档计数（检索交 WorkBuddy 工作台，D9）。",
+  "principle": [
+    "不走任务列表（TaskCreate）；本链本身就是工作驱动器，节点顺序即执行顺序。",
+    "时间戳只来自字幕/ASR 原始数据，LLM 不得生成或改写。",
+    "依赖缺失、登录失效、字幕缺失，一律早停（烧 token 之前）。",
+    "落盘前必查重；查不了就不写（kb 文件夹默认只增不删，宁可失败不产脏数据）。",
+    "证据由脚本产出，模型只写叙述层；evidence 字段可复算。",
+    "外部动作全部经 agentStep 暴露 visible 心跳，禁止黑箱批处理。",
+    "首次运行默认 dryRun，出清单交人确认后再真写。",
+    "只做个人学习研究的单视频编译；不下载、不转存、不再分发原始媒体文件（音频为临时产物，用完即删）。",
+    "D9 边界：本链只落盘 Markdown 卡片到 kb/<collection>/，不建向量索引、不做混合召回/重排——检索增强交由 WorkBuddy 工作台原生索引承载。",
+    "卡片必须带 [mm:ss] 锚点与 source_url#t=秒 深链：工作台检索召回的是文本段落、不会自动唤起播放器，回跳靠这两项人工定位。"
+  ],
+  "acceptance": [
+    "kb 文件夹文档计数增量 == 成功写入数（D9：无向量索引，不核验索引条数）",
+    "卡片所有 [mm:ss] 可回跳且落在时长区间内且升序",
+    "无字幕场景在 T3 关闭时明确报 NO_TRANSCRIPT，不产出空卡片",
+    "重复运行同一链接不新增文档（kb 文件夹计数不变）",
+    "全链 LLM 调用 ≤ 12，无阶段超预算",
+    "任一 gate 失败场景 0 次落盘（gate 前置）",
+    "交付含 narrative + evidence 两层，evidence 可复算",
+    "SESSDATA 不进黑板/LLM/日志/git，仅注入 yt-dlp 子进程 env（D3/FR-14）"
+  ],
+  "boundaries": {
+    "owns": "单视频链接 → 带时间戳 Markdown 卡片 → kb/<collection>/ 落盘的离线编译链（检索/向量化/重排交 WorkBuddy 工作台，D9）。",
+    "notOwns": [
+      "云端空间创建（keshi-studio.cn 为未来项目）",
+      "独立对话页 / 前端问答 UI（由 WorkBuddy 工作台承载）",
+      "条目编辑 / 删除（默认只增不删）",
+      "画面理解 / OCR / 多模态视频输入（P2）",
+      "批量与定时任务（P1，见 FR-11 / FR-13）",
+      "向量索引 / 混合检索 / 重排（已移交工作台，D9）",
+      "自建或调用任何 embedding 端点、本地 embedding 模型（D9）"
+    ]
+  },
+  "interfaces": {
+    "intake": "in: $.input{url,kbPath,collection?,lang?,mode?}；out: $.intake",
+    "redlines": "in: $.intake；emit redlines.pass/redlines.fail",
+    "validateInput": "in: $.intake；emit intake.valid/intake.invalid",
+    "bail": "in: 任一失败信号；out: $.output；halt",
+    "probeEnv": "in: $.intake；out: $.env{...,biliLogin,missing[]}；emit env.checked / probeEnv.needsBili",
+    "getCredential": "in: signal.probeEnv.needsBili；out: $.cred{loginState}；emit cred.ready",
+    "envGate": "in: $.env；emit env.pass/env.fail",
+    "prepare": "kind:chain → 子链 gen.video-to-knowledge.prepare（in: {url, lang}；pick: card；out: $.card）；emit prepare.ok/prepare.failed",
+    "qualityGate": "in: $.card；emit quality.pass/quality.fail",
+    "dedupeCheck": "in: $.card.files + kb/<collection> 现有卡片；out: $.dedupe + $.uploadQueue；emit dedupe.done/dedupe.abort",
+    "confirmGate": "in: $.dedupe + $.intake.mode；emit confirm.upload/confirm.hold",
+    "uploadLoop": "map over $.uploadQueue → 子链 gen.video-to-knowledge.upload；out: $.uploadResults；emit upload.done",
+    "verify": "in: $.uploadResults；out: $.verify{expected,actual,ok}；emit verify.done",
+    "deliver": "in: $.verify 或 confirm.hold；out: $.output；halt",
+    "qualityCheck": "in: $.card + $.meta；out: $.quality；emit quality.ready",
+    "outlineGate": "in: $.intake.outlinePath；emit outline.need/outline.skip",
+    "outlineMerge": "in: $.card + $.intake.outlinePath；out: $.outline；emit outline.done"
+  },
+  "regressionTests": [
+    {
+      "id": "RT-VK-1",
+      "type": "happy",
+      "input": "{\"url\":\"https://www.bilibili.com/video/BV1xx411c7mD\",\"kbPath\":\"<workDir>/kb\",\"collection\":\"bilibili\",\"mode\":\"dryRun\"}",
+      "expect": "产出 1 份卡片，质量门 pass，0 次落盘",
+      "rationale": "dryRun 主路径：跑完全链但跳过落盘，只出清单与卡片"
+    },
+    {
+      "id": "RT-VK-2",
+      "type": "happy",
+      "input": "{\"url\":\"https://www.bilibili.com/video/BV1xx411c7mD\",\"kbPath\":\"<workDir>/kb\",\"collection\":\"bilibili\",\"mode\":\"upload\"}",
+      "expect": "kb 文件夹文档 +1，verify.ok=true",
+      "rationale": "真实落盘路径：查重未命中 → confirm.upload → 写入 → 计数核验"
+    },
+    {
+      "id": "RT-VK-3",
+      "type": "edge",
+      "input": "重复运行 RT-VK-2 的同一 URL",
+      "expect": "dedupe.hit=true，skipped，kb 文件夹文档数不变",
+      "rationale": "幂等：同 video_id + 同 content_hash 不重复落盘"
+    },
+    {
+      "id": "RT-VK-4",
+      "type": "edge",
+      "input": "{\"url\":\"https://example.com/x\",\"kbPath\":\"...\"}",
+      "expect": "INVALID_URL → bail，0 次落盘",
+      "rationale": "URL 不可识别须提前终止且无副作用"
+    },
+    {
+      "id": "RT-VK-5",
+      "type": "edge",
+      "input": "B 站无字幕视频 + T3 关闭",
+      "expect": "NO_TRANSCRIPT → bail，0 次落盘，无空卡片",
+      "rationale": "无字幕且关闭本地 ASR 时不得产出空卡片"
+    },
+    {
+      "id": "RT-VK-6",
+      "type": "edge",
+      "input": "SESSDATA 缺失 / 过期",
+      "expect": "LOGIN_REQUIRED → bail（不得返回空字幕继续跑）",
+      "rationale": "登录失效必须早停，绝不让模型猜凭证"
+    },
+    {
+      "id": "RT-VK-7",
+      "type": "negative",
+      "input": "mock LLM 返回含伪造时间戳",
+      "expect": "伪造条目被剔除，dropped>0，卡片其余部分正常",
+      "rationale": "时间戳白名单校验是防幻觉的机械闸门"
+    },
+    {
+      "id": "RT-VK-8",
+      "type": "negative",
+      "input": "卡片含手机号",
+      "expect": "quality.fail（敏感信息），0 次落盘",
+      "rationale": "脱敏未命中须由质量门拦截，不写脏数据"
+    }
+  ],
+  "budget": {
+    "maxSteps": 800,
+    "maxLlmCalls": 12,
+    "maxTokens": 150000,
+    "maxWallMs": 3600000,
+    "maxNodeRuns": 3
+  },
+  "governance": {
+    "ssot": "chains/governance/iron-laws.json",
+    "ssotPointerToIronLaws": true,
+    "redlineRef": "L-GOV-001 元治理铁律; L-GOV-002 删除绝对禁令; L-GOV-006 操作类逐步反馈",
+    "note": "本链治理闸门=redlines 节点；missingGovernanceGate 由 gen.chain-governance 扫描。"
+  },
+  "experience": [
+    "[2026-10-24] D9 架构回撤：检索/向量化/重排整体交 WorkBuddy 工作台，本链只落盘 Markdown 卡片到 kb/<collection>/，不建向量索引、不调任何 embedding 端点或模型。",
+    "[2026-10-24] M0 前置依赖收敛：去掉本地向量引擎（sqlite-vec/chroma/FAISS）与 embedding 模型（bge-small-zh-v1.5 / bge-m3），仅剩 yt-dlp/ffmpeg/whisper + SESSDATA + kbPath/collection。",
+    "[2026-10-24] 跨产品文档误判教训：docs.work-buddy.ai 描述的是另一产品（work-buddy.ai，Python/Flask+LM Studio），非腾讯 WorkBuddy 桌面端（workbuddy.cn，Electron）。核实外部能力须先对齐文档域名/技术栈/产品归属，并用 curl/netstat/设置面板三源交叉验证。",
+    "[2026-10-24] 卡片必须带 [mm:ss] 锚点 + source_url#t=秒 深链：工作台检索召回文本段落、不会自动唤起播放器，回跳靠这两项人工定位。",
+    "[2026-10-24] 主链超 18 节点触发 oversized 告警 → 用 kind:chain 原语把「抓元数据/取字幕/清洗/编译/综述」拆成 gen.video-to-knowledge.prepare 子链，主链降至 14 节点。子链接参靠父节点 in 解析后作为 $.input，取回字段用 pick；失败信号由子链 ok/failed 回传（prepare.failed → 主链 bail）。",
+    "[2026-10-30] 修链：①新增 qualityCheck 节点写入 $.quality（原 qualityGate 判 $.quality.ok 却无任何节点生产 → 恒 fail → bail）；②B 站字幕路径改为实测有效的 yt-dlp --cookies，并把多分 P SRT 按 offsetSec 合并到整视频时间轴；③getCredential 改读 cookies 文件并只暴露路径；④新增 outlineGate/outlineMerge 把「填大纲」纳入链；⑤每个 agentStep 增加机读 exec 规格，使 agent 或 scripts/ajtc-exec.mjs 可直接执行，不再停留在自然语言动作描述。"
+  ],
+  "nodes": [
+    {
+      "id": "intake",
+      "kind": "fn",
+      "use": "set",
+      "title": "归一化入参（mode 缺省=dryRun，lang 缺省=zh-CN，collection 缺省=default，outlinePath 可选：给了就把卡片要点回写该大纲）",
+      "trigger": [
+        {
+          "on": "chain.start"
+        }
+      ],
+      "in": {
+        "values": {
+          "url": "=$.input.url",
+          "kbPath": "=$.input.kbPath",
+          "collection": "=$.input.collection",
+          "lang": "=$.input.lang",
+          "mode": "=$.input.mode",
+          "outlinePath": "=$.input.outlinePath",
+          "videoId": "=$.input.videoId"
+        }
+      },
+      "out": "$.intake",
+      "emit": [
+        "intake.ready"
+      ],
+      "declares": [
+        "intake.ready",
+        "intake.invalid"
+      ]
+    },
+    {
+      "id": "redlines",
+      "kind": "fn",
+      "use": "redlines",
+      "title": "红线门 / 意图护栏（SSOT: chains/governance/iron-laws.json · L-GOV-001 元治理铁律；L-GOV-002 删除绝对禁令）",
+      "trigger": [
+        {
+          "on": "signal.intake.ready"
+        }
+      ],
+      "in": {
+        "boundaryKeywords": [
+          "删除 kb 文件夹已有卡片",
+          "覆盖已有卡片",
+          "下载并转存音视频",
+          "分发受版权保护的媒体文件",
+          "把 SESSDATA 写入黑板/日志/git",
+          "上传到用户未指定的 kbPath/collection",
+          "自建向量索引",
+          "调用任何 embedding 端点或本地模型"
+        ]
+      },
+      "out": "$.redlines",
+      "emit": [
+        "redlines.pass"
+      ],
+      "declares": [
+        "redlines.pass",
+        "redlines.fail"
+      ],
+      "maxRuns": 2
+    },
+    {
+      "id": "validateInput",
+      "kind": "gate",
+      "title": "入参校验门：url / kbPath 非空 + 平台可识别",
+      "trigger": [
+        {
+          "on": "signal.redlines.pass"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.intake.url != null && $.intake.url != '' && $.intake.kbPath != null && $.intake.kbPath != ''",
+          "emit": "intake.valid",
+          "label": "入参齐全",
+          "reason": "url 与 kbPath 均非空，平台可识别（bilibili / youtube）"
+        }
+      ],
+      "out": "$.inputCheck",
+      "default": "intake.invalid",
+      "declares": [
+        "intake.valid",
+        "intake.invalid"
+      ]
+    },
+    {
+      "id": "bail",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "任一前置失败收口（0 副作用）",
+      "trigger": [
+        {
+          "on": "signal.intake.invalid"
+        },
+        {
+          "on": "signal.redlines.fail"
+        },
+        {
+          "on": "signal.env.fail"
+        },
+        {
+          "on": "signal.prepare.failed"
+        },
+        {
+          "on": "signal.quality.fail"
+        },
+        {
+          "on": "signal.dedupe.abort"
+        }
+      ],
+      "in": {
+        "answer": null,
+        "quality": {
+          "aborted": true,
+          "reason": "任一前置门未通过（intake.invalid / redlines.fail / env.fail / transcript.fail / quality.fail / dedupe.abort），未执行任何落盘动作"
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "chain.end"
+      ]
+    },
+    {
+      "id": "probeEnv",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "环境自检：依赖 + 登录态",
+      "trigger": [
+        {
+          "on": "signal.intake.valid"
+        }
+      ],
+      "in": {
+        "action": "运行 `python scripts/vk_chain.py doctor --url <$.input.url> --allow-cached`：检查 yt-dlp / ffmpeg / faster-whisper 是否可用，并判定 B 站登录态（valid=有完整 cookie；cached=显式启用本地缓存且有 meta.json+transcript.jsonl；invalid=都没有）。stdout 输出 $.env={ytdlp,ffmpeg,whisper,platform,videoId,biliLogin,cached,credMode,missing[]}。禁止自动安装任何依赖。",
+        "visible": "🔍 [probeEnv] 自检依赖与登录态（yt-dlp / ffmpeg / whisper / B 站登录）…",
+        "resultPath": "$.env"
+      },
+      "out": "$.env",
+      "maxRuns": 2,
+      "emit": [
+        "env.checked",
+        "probeEnv.needsBili"
+      ],
+      "declares": [
+        "env.checked",
+        "probeEnv.needsBili"
+      ],
+      "writes": [
+        "$.env"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "doctor",
+          "--url",
+          "${$.input.url}",
+          "--allow-cached"
+        ]
+      }
+    },
+    {
+      "id": "getCredential",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "凭证获取：SESSDATA 仓库外读取 + 仅注入子进程 env",
+      "trigger": [
+        {
+          "on": "signal.probeEnv.needsBili"
+        }
+      ],
+      "in": {
+        "action": "运行 `python scripts/vk_chain.py credential`：按 `$BILI_COOKIES` / `$VK_COOKIES` → `~/.workbuddy/secrets/bili-cookies.txt` → `~/.workbuddy/secrets/bili-sessdata` 顺序定位凭证，只返回 {loginState, mode, cookiesPath}；**绝不读取/输出 cookie 值**（仅做 SESSDATA 存在性判断），绝不进 LLM 上下文、绝不进日志。cookiesPath 供后续节点的 BILI_COOKIES 子进程 env 注入。",
+        "visible": "🔑 [getCredential] 从仓库外 secrets 读取 SESSDATA 并仅注入 yt-dlp 子进程 env（不落黑板/日志）…",
+        "resultPath": "$.cred"
+      },
+      "out": "$.cred",
+      "maxRuns": 1,
+      "writes": [
+        "$.cred"
+      ],
+      "emit": [
+        "cred.ready"
+      ],
+      "declares": [
+        "cred.ready"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "credential"
+        ]
+      }
+    },
+    {
+      "id": "envGate",
+      "kind": "gate",
+      "title": "依赖齐备门：missing[] 为空 → proceed",
+      "trigger": [
+        {
+          "on": "signal.env.checked"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.env.missing.length == 0 && $.env.biliLogin != 'invalid'",
+          "emit": "env.pass",
+          "label": "依赖齐备且登录可用",
+          "reason": "必需依赖无缺失；B 站登录态为 valid（完整 cookie），或 cached（显式启用本地缓存、复用已下载字幕）"
+        }
+      ],
+      "out": "$.envGate",
+      "default": "env.fail",
+      "declares": [
+        "env.pass",
+        "env.fail"
+      ]
+    },
+    {
+      "id": "prepare",
+      "kind": "chain",
+      "use": "gen.video-to-knowledge.prepare",
+      "title": "素材准备子链：抓元数据 → 取字幕 → 清洗 → 分块编译 → 综述",
+      "trigger": [
+        {
+          "on": "signal.env.pass"
+        }
+      ],
+      "in": {
+        "url": "=$.intake.url",
+        "lang": "=$.intake.lang"
+      },
+      "pick": "card",
+      "out": "$.card",
+      "maxRuns": 2,
+      "declares": [
+        "prepare.ok",
+        "prepare.failed"
+      ]
+    },
+    {
+      "id": "qualityCheck",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "质量门五项机器校验（真正写入 $.quality）",
+      "trigger": [
+        {
+          "on": "signal.prepare.ok"
+        }
+      ],
+      "in": {
+        "action": "运行 `python scripts/vk_chain.py quality --card runs/<videoId>/card.json --meta runs/<videoId>/meta.json`：对 $.card 的每个文件做五项校验并输出 $.quality={ok,checks:{frontmatter,timestamps,charCount,sensitive,placeholder},stats,issues[],perFile,reason}。五项：①frontmatter 必填齐；②每个 [mm:ss] 落在该分 P 的整视频区间内且「核心要点」内升序；③正文 500–50000 字；④无手机号/身份证/邮箱/银行卡；⑤无 ___ / TODO 占位符。任一项不过 → ok=false。",
+        "visible": "🧪 [qualityCheck] 五项机器校验（frontmatter/时间戳/字数/敏感/占位符）…",
+        "resultPath": "$.quality"
+      },
+      "out": "$.quality",
+      "maxRuns": 2,
+      "emit": [
+        "quality.ready"
+      ],
+      "declares": [
+        "quality.ready"
+      ],
+      "writes": [
+        "$.quality"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "quality",
+          "--card",
+          "runs/${$.card.videoId}/card.json",
+          "--meta",
+          "runs/${$.card.videoId}/meta.json"
+        ]
+      }
+    },
+    {
+      "id": "qualityGate",
+      "kind": "gate",
+      "title": "质量门 / 评审门（机器判定）：结构 / 时间戳 / 字数 / 敏感信息 / 占位符",
+      "trigger": [
+        {
+          "on": "signal.quality.ready"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.quality.ok == true",
+          "emit": "quality.pass",
+          "label": "五项校验全通过",
+          "reason": "frontmatter 齐全、时间戳升序且在时长内、字数 500–50000、敏感命中 0、无占位符残留"
+        }
+      ],
+      "out": "$.qualityGate",
+      "default": "quality.fail",
+      "declares": [
+        "quality.pass",
+        "quality.fail"
+      ]
+    },
+    {
+      "id": "dedupeCheck",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "落盘前查重：video_id + content_hash 双键",
+      "trigger": [
+        {
+          "on": "signal.quality.pass"
+        }
+      ],
+      "in": {
+        "action": "运行 `python scripts/vk_chain.py dedupe --card runs/<videoId>/card.json --kb <$.intake.kbPath> --collection <$.intake.collection>`：扫描 kb 目录现有卡片，按 (video_id, fileName) + content_hash 双键比对 $.card.files：①同名同 hash → skipped；②同名不同 hash → 追加 -v2（只增不删）；③未命中 → 进 queue。输出 $.dedupe={hit,skipped[],versioned[],queue[],existingCount,queueCount}。kb 读写异常 → 直接失败（宁可失败不写脏数据）。",
+        "visible": "🔁 [dedupeCheck] 对比 kb 文件夹现有卡片，防重复落盘…",
+        "resultPath": "$.dedupe"
+      },
+      "out": "$.dedupe",
+      "maxRuns": 2,
+      "emit": [
+        "dedupe.done"
+      ],
+      "declares": [
+        "dedupe.done",
+        "dedupe.abort"
+      ],
+      "writes": [
+        "$.dedupe",
+        "$.uploadQueue"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "dedupe",
+          "--card",
+          "runs/${$.card.videoId}/card.json",
+          "--kb",
+          "${$.intake.kbPath}",
+          "--collection",
+          "${$.intake.collection}"
+        ]
+      }
+    },
+    {
+      "id": "confirmGate",
+      "kind": "gate",
+      "title": "确认门：dryRun 或需人工确认 → hold；否则 upload",
+      "trigger": [
+        {
+          "on": "signal.dedupe.done"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.intake.mode == 'upload' && $.dedupe.queue.length > 0",
+          "emit": "confirm.upload",
+          "label": "允许落盘",
+          "reason": "mode=upload 且待写队列非空"
+        }
+      ],
+      "out": "$.confirm",
+      "default": "confirm.hold",
+      "declares": [
+        "confirm.upload",
+        "confirm.hold"
+      ]
+    },
+    {
+      "id": "uploadLoop",
+      "kind": "map",
+      "title": "逐文件落盘（子链）",
+      "trigger": [
+        {
+          "on": "signal.confirm.upload"
+        }
+      ],
+      "over": "$.dedupe.queue",
+      "use": "gen.video-to-knowledge.upload",
+      "limit": 20,
+      "onItemError": "continue",
+      "out": "$.uploadResults",
+      "emit": [
+        "upload.done"
+      ],
+      "declares": [
+        "upload.done",
+        "upload.partial"
+      ]
+    },
+    {
+      "id": "verify",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "核验：kb 文件夹文档计数增量（无向量索引）",
+      "trigger": [
+        {
+          "on": "signal.upload.done"
+        }
+      ],
+      "in": {
+        "action": "运行 `python scripts/vk_chain.py verify --video-id <videoId> --kb <$.intake.kbPath> --collection <$.intake.collection> --expect <$.dedupe.queueCount> --failures <$.uploadResults.failures.length>`：统计 kb 目录里 card-<videoId>-p*.md 的数量，并读取上传结果的失败条数；只有『计数达标 且 失败数为 0』才 ok=true。输出 $.verify={expected,actual,failures,ok,kbPath}。只核验文档计数，不核验向量索引（D9）。",
+        "visible": "✅ [verify] 复核 kb 文件夹文档计数增量是否等于成功写入数…",
+        "resultPath": "$.verify"
+      },
+      "out": "$.verify",
+      "maxRuns": 2,
+      "emit": [
+        "verify.done"
+      ],
+      "declares": [
+        "verify.done"
+      ],
+      "writes": [
+        "$.verify"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "verify",
+          "--video-id",
+          "${$.card.videoId}",
+          "--kb",
+          "${$.intake.kbPath}",
+          "--collection",
+          "${$.intake.collection}",
+          "--expect",
+          "${$.dedupe.queueCount}",
+          "--failures",
+          "${$.uploadResults.failures.length}"
+        ]
+      }
+    },
+    {
+      "id": "outlineGate",
+      "kind": "gate",
+      "title": "大纲回写门：入参给了 outlinePath 才回写",
+      "trigger": [
+        {
+          "on": "signal.verify.done"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.intake.outlinePath != null && $.intake.outlinePath != ''",
+          "emit": "outline.need",
+          "label": "需要回写大纲",
+          "reason": "入参指定了 outlinePath，把卡片核心要点灌进该大纲对应 P 段"
+        }
+      ],
+      "out": "$.outlineGate",
+      "default": "outline.skip",
+      "declares": [
+        "outline.need",
+        "outline.skip"
+      ]
+    },
+    {
+      "id": "outlineMerge",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "把卡片核心要点灌进大纲「笔记区」",
+      "trigger": [
+        {
+          "on": "signal.outline.need"
+        }
+      ],
+      "in": {
+        "action": "运行 `python scripts/vk_chain.py outline --card runs/<videoId>/card.json --outline <$.intake.outlinePath>`：按卡片 fileName 里的 part 序号匹配大纲的 `## P<n> ·` 小节，用该卡「## 核心要点」的全部条目替换小节内 `- 笔记区…` 占位块，输出 $.outline={ok,updated,path,written,skipped[]}。找不到小节或占位时记入 skipped，不静默丢弃。",
+        "visible": "📝 [outlineMerge] 把卡片要点灌进大纲…",
+        "resultPath": "$.outline"
+      },
+      "out": "$.outline",
+      "maxRuns": 2,
+      "emit": [
+        "outline.done"
+      ],
+      "declares": [
+        "outline.done"
+      ],
+      "writes": [
+        "$.outline"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "outline",
+          "--card",
+          "runs/${$.card.videoId}/card.json",
+          "--outline",
+          "${$.intake.outlinePath}"
+        ]
+      }
+    },
+    {
+      "id": "deliver",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "收敛交付：完成包（narrative + evidence）",
+      "trigger": [
+        {
+          "on": "signal.outline.done"
+        },
+        {
+          "on": "signal.outline.skip"
+        },
+        {
+          "on": "signal.confirm.hold"
+        }
+      ],
+      "in": {
+        "answer": "=$.verify",
+        "quality": "=$.verify",
+        "completionPackage": {
+          "scope": "把 $.intake.url 编译成带时间戳的 Markdown 知识卡片，幂等落盘到 $.intake.kbPath/<collection>",
+          "changeScope": "环境自检 → prepare 子链（元数据 → 字幕 → 清洗 → 分块编译 → 组装卡片）→ 质量五项校验 → 查重 → 落盘 → 计数核验 →（可选）大纲回写",
+          "designRationale": "以 agentStep 原语把外部工具（yt-dlp / ffmpeg / whisper / 本地脚本）显式建模为链节点，使编译过程可见、可复盘；D9 后检索/向量化/重排移交 WorkBuddy 工作台，本链只负责「视频→卡片落盘」。",
+          "risks": "$.verify.ok == false 表示文档计数不符，需人工排查；卡片的 [mm:ss] 回跳需用户手动定位（G1）",
+          "verificationResults": "=$.verify",
+          "narrative": {
+            "summary": "= \"已产出 \" + $.card.files.length + \" 张卡片，落盘 \" + $.verify.actual + \" 个文档（ok=\" + $.verify.ok + \"）\"",
+            "note": "叙述层（AI 写）：面向人说明干了什么、卡在哪、需要你定什么"
+          },
+          "evidence": {
+            "note": "证据层（机器出）：以下由 agentStep 节点（代理执行 + 机器计数）生成，模型无法改写；素材准备阶段（meta / transcript / clean / chunks）的证据见 prepare 子链自身的完成包",
+            "card": "=$.card",
+            "dedupe": "=$.dedupe",
+            "uploadResults": "=$.uploadResults",
+            "verify": "=$.verify",
+            "quality": "=$.quality",
+            "outline": "=$.outline"
+          },
+          "nextSteps": [
+            "卡片已落盘到 kb/<collection>/，可直接在 WorkBuddy 工作台检索/追问",
+            "若 $.verify.ok==false：检查 $.uploadResults.failures，重跑单文件子链"
+          ]
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "deliver.done",
+        "chain.end"
+      ]
+    }
+  ],
+  "creed": "road"
+}

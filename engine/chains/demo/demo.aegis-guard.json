@@ -1,0 +1,165 @@
+{
+  "id": "demo.aegis-guard",
+  "title": "Aegis 双闸门实链验证（deletionGuard + verificationGate）",
+  "version": "0.1.0",
+  "tier": "demo",
+  "intent": "在真实触发链执行里验证继承自 Aegis 的两道机械闸门：deletionGuard（删除/不可逆护栏，对齐 L-GOV-002）+ verificationGate（完成前证据契约，对齐 L-GOV-033）。链从 $.input 读取 targets/claims，依次过删护栏→完成证据契约，任一未过即收口 halt。证明两道继承闸门在 live chain 中真实触发、信号驱动、可收口。",
+  "principle": [
+    "删除护栏先于一切破坏性动作：persistent-state / 个人文件 / 递归删除一律硬停，须显式 scoped 授权（空泛同意无效）。",
+    "完成前证据契约：声称完成前必须带 fresh 证据 + 必填槽位 + 置信度 A/B，C 级不得声称完成。",
+    "两道闸门皆为只读分析节点（与 redlines 同级），只 emit 信号、不动文件系统。",
+    "任一闸门未过 → 立即收口 halt，不进入交付；全部通过才 deliver。",
+    "LLM 调用数为 0，全程确定性 fn 决策。"
+  ],
+  "acceptance": [
+    "delGuard 对 persistent-state/个人文件/递归删除 emit deletionGuard.blocked → gate 收口 halt。",
+    "delGuard 对 code-retirement/derived-state（无授权需求）emit deletionGuard.allowed → 进入 verify。",
+    "verify 对缺槽位或 C 级声称完成 emit verification.fail → gate 收口 halt。",
+    "verify 对带证据的 A/B 级 claim emit verification.pass → deliverOk 交付。",
+    "链在预算内自然终止，无熔断。"
+  ],
+  "budget": {
+    "maxSteps": 40,
+    "maxLlmCalls": 1,
+    "maxTokens": 2000,
+    "maxWallMs": 120000,
+    "maxNodeRuns": 8
+  },
+  "governance": {
+    "ssot": "chains/governance/iron-laws.json",
+    "redlineRef": "L-GOV-002 删除绝对禁令; L-GOV-033 完成前证据契约"
+  },
+  "boundaries": {
+    "owns": "删除护栏（分类/路由/硬停）+ 完成前证据契约（claim 定级/判可信）两道只读机械闸门的 live chain 串联与收口。",
+    "notOwns": [
+      "真实删除/迁移/覆盖文件系统或数据库（本链只分析、只 emit 信号，0 副作用）",
+      "跨项目 git 提交、推送、备份",
+      "对 L-GOV-002/L-GOV-033 铁律本身的修订（属 gen.chain-governance 权责）"
+    ],
+    "escalateTo": "战略层（人）—— persistent-state 真实删除须用户显式 scoped 授权；本链只判停、不代执行"
+  },
+  "nodes": [
+    {
+      "id": "delGuard",
+      "kind": "fn",
+      "use": "deletionGuard",
+      "title": "删除护栏：分类 + 路由 + 硬停",
+      "trigger": [{ "on": "chain.start" }],
+      "in": {
+        "targets": "=$.input.targets",
+        "userConfirmation": "=$.input.userConfirmation"
+      },
+      "out": "$.delGuard",
+      "declares": ["deletionGuard.blocked", "deletionGuard.allowed"],
+      "maxRuns": 1
+    },
+    {
+      "id": "delBranch",
+      "kind": "gate",
+      "title": "删除护栏分流",
+      "trigger": [
+        { "on": "signal.deletionGuard.blocked" },
+        { "on": "signal.deletionGuard.allowed" }
+      ],
+      "cases": [
+        {
+          "when": "$.delGuard.summary.blocked > 0",
+          "emit": "guard.blocked",
+          "label": "删除被硬停",
+          "reason": "存在 blocked 目标，须用户显式 scoped 授权，空泛同意无效"
+        }
+      ],
+      "default": "guard.cleared",
+      "declares": ["guard.blocked", "guard.cleared"],
+      "maxRuns": 1
+    },
+    {
+      "id": "bailDel",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "删除被拦截收口（0 副作用）",
+      "trigger": [{ "on": "signal.guard.blocked" }],
+      "in": {
+        "answer": null,
+        "quality": {
+          "aborted": true,
+          "reason": "deletionGuard 硬停：persistent-state / 个人文件 / 递归删除 / source-of-truth 须用户显式 scoped 授权，空泛同意无效（L-GOV-002）"
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": ["chain.end"]
+    },
+    {
+      "id": "verify",
+      "kind": "fn",
+      "use": "verificationGate",
+      "title": "完成前证据契约",
+      "trigger": [{ "on": "signal.guard.cleared" }],
+      "in": {
+        "claims": "=$.input.claims"
+      },
+      "out": "$.verGate",
+      "declares": ["verification.pass", "verification.fail"],
+      "maxRuns": 1
+    },
+    {
+      "id": "verBranch",
+      "kind": "gate",
+      "title": "完成证据契约分流",
+      "trigger": [
+        { "on": "signal.verification.pass" },
+        { "on": "signal.verification.fail" }
+      ],
+      "cases": [
+        {
+          "when": "$.verGate.aggregated.ok == false",
+          "emit": "verify.failed",
+          "label": "完成证据不足",
+          "reason": "claim 缺必填槽位，或 C 级声称完成"
+        }
+      ],
+      "default": "verify.cleared",
+      "declares": ["verify.failed", "verify.cleared"],
+      "maxRuns": 1
+    },
+    {
+      "id": "bailVer",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "完成证据不足收口（0 副作用）",
+      "trigger": [{ "on": "signal.verify.failed" }],
+      "in": {
+        "answer": null,
+        "quality": {
+          "aborted": true,
+          "reason": "verificationGate 未通过：完成前必须附带 fresh 证据 + 必填槽位 + 置信度 A/B，C 级不得声称完成（L-GOV-033）"
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": ["chain.end"]
+    },
+    {
+      "id": "deliverOk",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "双闸通过，交付",
+      "trigger": [{ "on": "signal.verify.cleared" }],
+      "in": {
+        "answer": {
+          "status": "ok",
+          "delGuard": "=$.delGuard.summary",
+          "verGate": "=$.verGate.aggregated"
+        },
+        "quality": {
+          "passed": true,
+          "reason": "deletionGuard + verificationGate 双闸通过"
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": ["chain.end"]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+# dsh bundle patch: 把本插件插入 profile 的 layer 栈。
+# `id` 是 layer 栈中的行键（短、无作用域）；`name` 是要解析的包名（带作用域）。
+- insert:
+    - id: dsh-video-to-knowledge
+      name: 'dsh-video-to-knowledge'

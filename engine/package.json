@@ -1,0 +1,10 @@
+{
+  "name": "ajtc-engine-vendored",
+  "version": "1.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Vendored AJTC trigger-chain engine runtime (CJS). Isolated from the plugin root's ESM context.",
+  "optionalDependencies": {
+    "mysql2": "^3.0.0"
+  }
+}

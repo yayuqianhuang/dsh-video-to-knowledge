@@ -1,0 +1,56 @@
+{
+  "name": "dsh-video-to-knowledge",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DeepSeek Harness (dsh) 插件：把「视频链接 → 带时间戳的 Markdown 知识卡 → 落盘 kb/」整条 AJTC 触发链封装成开箱可用工具。含环境自检、素材准备、五项质量校验、查重、落盘、计数核验与大纲回写。",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "video-to-knowledge",
+    "ajtc",
+    "trigger-chain",
+    "bilibili",
+    "yt-dlp",
+    "knowledge-base"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yayuqianhuang/dsh-video-to-knowledge.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "prepack": "node scripts/clean-pack.mjs",
+    "test": "node scripts/smoke.mjs",
+    "clean": "node scripts/clean-pack.mjs"
+  },
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "engine",
+    "pipeline",
+    "runner",
+    "memory",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "dsh": ">=0.1.0-rc.7 <0.3.0",
+    "node": ">=22.19"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

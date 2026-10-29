@@ -1,0 +1,52 @@
+{
+  "_comment": "Curated author-declared `provides` (capabilities) per plugin. This is a transparent, reviewable recommendation layer — semantic capability is not mechanically derivable, so it is curated by the standard's author. Chains absent from this map default to provides:[] (no capability advertised). If a chain already declares `provides` in its frontmatter, that value wins over this map. See docs/trigger-chain-plugin-standard.md §3.1 / §8.",
+  "_reviewedAt": "2026-10-28",
+  "sys.genesis": [
+    "chain-blueprint"
+  ],
+  "sys.prelude": [
+    "prelude"
+  ],
+  "gen.explainer": [
+    "explain"
+  ],
+  "gen.extract-pipeline": [
+    "extract"
+  ],
+  "gen.generic-pipeline": [
+    "generic-pipeline"
+  ],
+  "gen.summarize": [
+    "summarize"
+  ],
+  "gen.identity-bootstrap": [
+    "identity"
+  ],
+  "gen.video-to-knowledge": [
+    "video-to-knowledge"
+  ],
+  "gen.video-to-knowledge.prepare": [
+    "video-to-knowledge-prepare"
+  ],
+  "gen.video-to-knowledge.chunk": [
+    "video-to-knowledge-chunk"
+  ],
+  "gen.video-to-knowledge.upload": [
+    "video-to-knowledge-upload"
+  ],
+  "demo.aegis-guard": [
+    "aegis-demo"
+  ],
+  "demo.capability-gated-call": [
+    "capability-gated-demo"
+  ],
+  "code-anchor-nodes": [
+    "code-anchor"
+  ],
+  "gen.chain-extend": [
+    "chain-extend"
+  ],
+  "gen.chain-governance": [
+    "chain-governance"
+  ]
+}

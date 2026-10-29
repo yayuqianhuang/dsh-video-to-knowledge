@@ -1,0 +1,547 @@
+{
+  "id": "gen.summarize",
+  "title": "事实优先摘要链",
+  "version": "0.3.0",
+  "tier": "utility",
+  "intent": "造一条把长文生成摘要的链",
+  "principle": [
+    "每个阶段必须有可被 Schema 校验的产出。",
+    "证据不足返回 null 并报 issue，不臆造。",
+    "相邻阶段之间必须有真实信息增量。",
+    "每个节点执行后必须产生可观测的逐步反馈（通过信号与追踪器暴露本步的操作与产出），整条链的运行过程可被逐步复盘，不能是黑箱。",
+    "战略层（意图 / 原则 / 验收 / 红线 / 边界）由人设定，AI 只能执行与追问，不得自行改写或降低标准。"
+  ],
+  "acceptance": [
+    "每个阶段产出符合其输出契约",
+    "最终产出覆盖全部验收条件",
+    "链在预算内自然终止",
+    "运行过程每一步都可被追踪与反馈，而非黑箱执行。",
+    "产出符合各节点声明的输出契约（expect），无契约违例。"
+  ],
+  "redlines": [
+    "AI 不得单方定义或降低成功标准",
+    "AI 不得伪造证据、编造数据或结果",
+    "不得跳过任何验收门（review / assert / 回归）",
+    "不得越出本链声明的作战边界，侵入不归本链管辖的系统或数据",
+    "不得删除或覆盖运行证据与追踪记录"
+  ],
+  "boundaries": {
+    "owns": "造一条把长文生成摘要的链",
+    "notOwns": [
+      "战略目标与验收标准的设定（属人，AI 只能执行与追问）",
+      "超出本链 intent 声明范围的系统、代码与数据",
+      "删除 / 迁移 / 资金 / 对外承诺等不可逆动作的最终决策"
+    ],
+    "escalateTo": "战略层（人）—— 经 clarify 护栏发 clarify.block，由 bail 收口交回"
+  },
+  "budget": {
+    "maxSteps": 200,
+    "maxLlmCalls": 40,
+    "maxTokens": 200000,
+    "maxWallMs": 600000,
+    "maxNodeRuns": 8
+  },
+  "regressionTests": [
+    {
+      "id": "RT-SUMM-1",
+      "type": "happy",
+      "input": "summarise 一篇长文",
+      "expect": "产出 oneline/brief/full 三档且不引入新信息",
+      "rationale": "主路径事实优先"
+    },
+    {
+      "id": "RT-SUMM-2",
+      "type": "edge",
+      "input": "超短输入",
+      "expect": "仍可产出一句话摘要，不报错",
+      "rationale": "边界"
+    },
+    {
+      "id": "RT-SUMM-3",
+      "type": "adversarial",
+      "input": "要求摘要包含原文没有的论断",
+      "expect": "拒绝引入新信息并在 issues 标注",
+      "rationale": "防幻觉"
+    },
+    {
+      "id": "RT-SUMM-4",
+      "type": "regression",
+      "input": "此前 gen.summarize 历史样例",
+      "expect": "事实采集→提纲→三档摘要结构稳定",
+      "rationale": "结构回归"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "intake",
+      "kind": "fn",
+      "title": "入口归一化",
+      "use": "intake",
+      "trigger": [
+        {
+          "on": "chain.start"
+        }
+      ],
+      "in": {
+        "raw": "$.input"
+      },
+      "out": "$.intake",
+      "declares": [
+        "intake.ready",
+        "intake.invalid"
+      ]
+    },
+    {
+      "id": "bail",
+      "kind": "fn",
+      "title": "入参非法，提前终止",
+      "use": "deliver",
+      "trigger": [
+        {
+          "on": "signal.intake.invalid"
+        }
+      ],
+      "in": {
+        "answer": null,
+        "quality": {
+          "aborted": true,
+          "reason": "输入缺少可执行目标"
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "chain.end"
+      ]
+    },
+    {
+      "id": "harvest",
+      "kind": "llm",
+      "title": "事实采集",
+      "role": "fact-harvester",
+      "trigger": [
+        {
+          "on": "signal.intake.ready"
+        }
+      ],
+      "prompt": {
+        "system": "你是一条 AI JSON 触发链上的一个执行单元，不是聊天助手。\n只输出一个 JSON 对象。不要代码围栏，不要解释，不要寒暄，不要在 JSON 前后添加任何字符。\n输出必须是统一信封格式：{\"meta\":{},\"data\":{},\"signals\":[],\"issues\":[]}。\n  meta   放置 confidence（0-1 的自评置信度）与你认为重要的元信息；\n  data   放置本节点的实质产出，必须严格符合下方给出的输出契约；\n  signals 放置你判断应当触发的下游信号名，只能从「可用信号」中选择；\n  issues 放置你发现的问题，格式 {\"severity\":\"low|medium|high|critical\",\"where\":\"\",\"msg\":\"\"}。\n证据不足时，把对应字段置为 null 并在 issues 中说明，绝不允许编造。\n如果输入自相矛盾，不要自行折中，必须在 issues 中显式指出冲突。\n你是一个可被逐步观察的执行单元：整条链的运行过程（每个节点的触发、输入、产出、信号）都会被追踪器记录并可逐步复盘，不要把中间过程当黑箱。\n【你的角色】fact-harvester\n【你的职责】先把可核验的事实抽成条目再谈总结。每条事实标注来源，不可核验的一律不收。\n【所属链的意图】造一条把长文生成摘要的链\n【本链的设计原则】\n  1. 每个阶段必须有可被 Schema 校验的产出。\n  2. 证据不足返回 null 并报 issue，不臆造。\n  3. 相邻阶段之间必须有真实信息增量。\n  4. 每个节点执行后必须产生可观测的逐步反馈（通过信号与追踪器暴露本步的操作与产出），整条链的运行过程可被逐步复盘，不能是黑箱。\n【可用信号】harvest.done\n【输出契约 data 必须满足】\n  - facts (array, 必填，至少 1 项)",
+        "user": "【总目标】\n{{$.intake.goal}}\n\n【本阶段任务】\n先把可核验的事实抽成条目，不可核验的一律不收\n\n【上游产出】\n【归一化后的输入】\n{{$.intake}}\n\n【最终验收条件】\n1. 每个阶段产出符合其输出契约\n2. 最终产出覆盖全部验收条件\n3. 链在预算内自然终止\n4. 运行过程每一步都可被追踪与反馈，而非黑箱执行。\n\n现在输出你的 JSON 信封。"
+      },
+      "expect": {
+        "type": "object",
+        "required": [
+          "facts"
+        ],
+        "properties": {
+          "facts": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "text"
+              ]
+            }
+          }
+        }
+      },
+      "temperature": 0.2,
+      "retry": {
+        "max": 2,
+        "onExhausted": "throw"
+      },
+      "out": "$.harvest",
+      "emit": [
+        "harvest.done"
+      ],
+      "declares": [
+        "harvest.done"
+      ],
+      "maxRuns": 6
+    },
+    {
+      "id": "outline",
+      "kind": "llm",
+      "title": "组织骨架",
+      "role": "outliner",
+      "trigger": [
+        {
+          "on": "signal.harvest.done"
+        }
+      ],
+      "prompt": {
+        "system": "你是一条 AI JSON 触发链上的一个执行单元，不是聊天助手。\n只输出一个 JSON 对象。不要代码围栏，不要解释，不要寒暄，不要在 JSON 前后添加任何字符。\n输出必须是统一信封格式：{\"meta\":{},\"data\":{},\"signals\":[],\"issues\":[]}。\n  meta   放置 confidence（0-1 的自评置信度）与你认为重要的元信息；\n  data   放置本节点的实质产出，必须严格符合下方给出的输出契约；\n  signals 放置你判断应当触发的下游信号名，只能从「可用信号」中选择；\n  issues 放置你发现的问题，格式 {\"severity\":\"low|medium|high|critical\",\"where\":\"\",\"msg\":\"\"}。\n证据不足时，把对应字段置为 null 并在 issues 中说明，绝不允许编造。\n如果输入自相矛盾，不要自行折中，必须在 issues 中显式指出冲突。\n你是一个可被逐步观察的执行单元：整条链的运行过程（每个节点的触发、输入、产出、信号）都会被追踪器记录并可逐步复盘，不要把中间过程当黑箱。\n【你的角色】outliner\n【你的职责】先搭骨架再写内容。大纲要覆盖全部验收条件，每个小节标明要点。\n【所属链的意图】造一条把长文生成摘要的链\n【本链的设计原则】\n  1. 每个阶段必须有可被 Schema 校验的产出。\n  2. 证据不足返回 null 并报 issue，不臆造。\n  3. 相邻阶段之间必须有真实信息增量。\n  4. 每个节点执行后必须产生可观测的逐步反馈（通过信号与追踪器暴露本步的操作与产出），整条链的运行过程可被逐步复盘，不能是黑箱。\n【可用信号】outline.done\n【输出契约 data 必须满足】\n  - outline (array, 必填，至少 2 项)",
+        "user": "【总目标】\n{{$.intake.goal}}\n\n【本阶段任务】\n把事实组织成有层次的提纲\n\n【上游产出】\n【事实采集】\n{{$.harvest}}\n\n【最终验收条件】\n1. 每个阶段产出符合其输出契约\n2. 最终产出覆盖全部验收条件\n3. 链在预算内自然终止\n4. 运行过程每一步都可被追踪与反馈，而非黑箱执行。\n\n现在输出你的 JSON 信封。"
+      },
+      "expect": {
+        "type": "object",
+        "required": [
+          "outline"
+        ],
+        "properties": {
+          "outline": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "required": [
+                "h"
+              ]
+            }
+          }
+        }
+      },
+      "temperature": 0.2,
+      "retry": {
+        "max": 2,
+        "onExhausted": "throw"
+      },
+      "out": "$.outline",
+      "emit": [
+        "outline.done"
+      ],
+      "declares": [
+        "outline.done"
+      ],
+      "maxRuns": 6
+    },
+    {
+      "id": "summarize",
+      "kind": "llm",
+      "title": "三档摘要",
+      "role": "summarizer",
+      "trigger": [
+        {
+          "on": "signal.outline.done"
+        }
+      ],
+      "prompt": {
+        "system": "你是一条 AI JSON 触发链上的一个执行单元，不是聊天助手。\n只输出一个 JSON 对象。不要代码围栏，不要解释，不要寒暄，不要在 JSON 前后添加任何字符。\n输出必须是统一信封格式：{\"meta\":{},\"data\":{},\"signals\":[],\"issues\":[]}。\n  meta   放置 confidence（0-1 的自评置信度）与你认为重要的元信息；\n  data   放置本节点的实质产出，必须严格符合下方给出的输出契约；\n  signals 放置你判断应当触发的下游信号名，只能从「可用信号」中选择；\n  issues 放置你发现的问题，格式 {\"severity\":\"low|medium|high|critical\",\"where\":\"\",\"msg\":\"\"}。\n证据不足时，把对应字段置为 null 并在 issues 中说明，绝不允许编造。\n如果输入自相矛盾，不要自行折中，必须在 issues 中显式指出冲突。\n你是一个可被逐步观察的执行单元：整条链的运行过程（每个节点的触发、输入、产出、信号）都会被追踪器记录并可逐步复盘，不要把中间过程当黑箱。\n【你的角色】summarizer\n【你的职责】产出三档摘要（一句话/简要/完整）。摘要必须只包含上游事实中出现过的内容，不得引入新信息。\n【所属链的意图】造一条把长文生成摘要的链\n【本链的设计原则】\n  1. 每个阶段必须有可被 Schema 校验的产出。\n  2. 证据不足返回 null 并报 issue，不臆造。\n  3. 相邻阶段之间必须有真实信息增量。\n  4. 每个节点执行后必须产生可观测的逐步反馈（通过信号与追踪器暴露本步的操作与产出），整条链的运行过程可被逐步复盘，不能是黑箱。\n【可用信号】summarize.done\n【输出契约 data 必须满足】\n  - oneline (string, 必填)\n  - brief (string, 必填)\n  - full (string, 可选)\n  - keyPoints (array, 可选)\n  - confidence (number, 可选)",
+        "user": "【总目标】\n{{$.intake.goal}}\n\n【本阶段任务】\n产出一句话/简要/完整三档摘要，不得引入新信息\n\n【上游产出】\n【组织骨架】\n{{$.outline}}\n\n【最终验收条件】\n1. 每个阶段产出符合其输出契约\n2. 最终产出覆盖全部验收条件\n3. 链在预算内自然终止\n4. 运行过程每一步都可被追踪与反馈，而非黑箱执行。\n\n现在输出你的 JSON 信封。"
+      },
+      "expect": {
+        "type": "object",
+        "required": [
+          "oneline",
+          "brief"
+        ],
+        "properties": {
+          "oneline": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "brief": {
+            "type": "string"
+          },
+          "full": {
+            "type": "string"
+          },
+          "keyPoints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "confidence": {
+            "type": "number"
+          }
+        }
+      },
+      "temperature": 0.2,
+      "retry": {
+        "max": 2,
+        "onExhausted": "throw"
+      },
+      "out": "$.summarize",
+      "emit": [
+        "summarize.done"
+      ],
+      "declares": [
+        "summarize.done"
+      ],
+      "maxRuns": 6
+    },
+    {
+      "id": "review",
+      "kind": "llm",
+      "title": "质量评审",
+      "role": "critic",
+      "trigger": [
+        {
+          "on": "signal.summarize.done"
+        },
+        {
+          "on": "signal.revise.done"
+        }
+      ],
+      "prompt": {
+        "system": "你是一条 AI JSON 触发链上的一个执行单元，不是聊天助手。\n只输出一个 JSON 对象。不要代码围栏，不要解释，不要寒暄，不要在 JSON 前后添加任何字符。\n输出必须是统一信封格式：{\"meta\":{},\"data\":{},\"signals\":[],\"issues\":[]}。\n  meta   放置 confidence（0-1 的自评置信度）与你认为重要的元信息；\n  data   放置本节点的实质产出，必须严格符合下方给出的输出契约；\n  signals 放置你判断应当触发的下游信号名，只能从「可用信号」中选择；\n  issues 放置你发现的问题，格式 {\"severity\":\"low|medium|high|critical\",\"where\":\"\",\"msg\":\"\"}。\n证据不足时，把对应字段置为 null 并在 issues 中说明，绝不允许编造。\n如果输入自相矛盾，不要自行折中，必须在 issues 中显式指出冲突。\n你是一个可被逐步观察的执行单元：整条链的运行过程（每个节点的触发、输入、产出、信号）都会被追踪器记录并可逐步复盘，不要把中间过程当黑箱。\n【你的角色】critic\n【你的职责】严格评审，给出 0-1 分与具体缺陷。你的价值在于找出问题，不是鼓励。没有缺陷时才允许 weaknesses 为空。\n【所属链的意图】造一条把长文生成摘要的链\n【本链的设计原则】\n  1. 每个阶段必须有可被 Schema 校验的产出。\n  2. 证据不足返回 null 并报 issue，不臆造。\n  3. 相邻阶段之间必须有真实信息增量。\n  4. 每个节点执行后必须产生可观测的逐步反馈（通过信号与追踪器暴露本步的操作与产出），整条链的运行过程可被逐步复盘，不能是黑箱。\n【可用信号】review.done\n【输出契约 data 必须满足】\n  - score (number, 必填，范围 0~1)\n  - strengths (array, 可选)\n  - weaknesses (array, 必填)\n  - suggestions (array, 可选)",
+        "user": "【总目标】\n{{$.intake.goal}}\n\n【本阶段任务】\n对照验收条件严格评审最终产出，给出 0-1 分与具体缺陷\n\n【上游产出】\n【待评审产出（若已修订则为修订版）】\n{{coalesce($.revised.patched, $.summarize)}}\n\n【最终验收条件】\n1. 每个阶段产出符合其输出契约\n2. 最终产出覆盖全部验收条件\n3. 链在预算内自然终止\n4. 运行过程每一步都可被追踪与反馈，而非黑箱执行。\n\n现在输出你的 JSON 信封。"
+      },
+      "expect": {
+        "type": "object",
+        "required": [
+          "score",
+          "weaknesses"
+        ],
+        "properties": {
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "strengths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "weaknesses": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "where",
+                "severity",
+                "msg"
+              ]
+            }
+          },
+          "suggestions": {
+            "type": "array"
+          }
+        }
+      },
+      "temperature": 0.1,
+      "retry": {
+        "max": 2,
+        "onExhausted": "passthrough"
+      },
+      "out": "$.review",
+      "appendTo": "$.reviewHistory",
+      "emit": [
+        "review.done"
+      ],
+      "declares": [
+        "review.done"
+      ],
+      "maxRuns": 3
+    },
+    {
+      "id": "qualityGate",
+      "kind": "gate",
+      "title": "质量闸门",
+      "trigger": [
+        {
+          "on": "signal.review.done"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.review.score >= 0.85",
+          "emit": "quality.pass",
+          "label": "达标",
+          "reason": "评分达到目标 0.85"
+        },
+        {
+          "when": "len($.reviewHistory) >= 2",
+          "emit": "quality.exhausted",
+          "label": "轮次耗尽",
+          "reason": "已迭代 2 轮，收益递减，强制收敛"
+        },
+        {
+          "when": "empty($.review.weaknesses)",
+          "emit": "quality.pass",
+          "label": "无缺陷",
+          "reason": "评审未发现缺陷"
+        }
+      ],
+      "default": "quality.fail",
+      "declares": [
+        "quality.pass",
+        "quality.exhausted",
+        "quality.fail"
+      ]
+    },
+    {
+      "id": "revise",
+      "kind": "llm",
+      "title": "定向修订",
+      "role": "patcher",
+      "trigger": [
+        {
+          "on": "signal.quality.fail"
+        }
+      ],
+      "prompt": {
+        "system": "你是一条 AI JSON 触发链上的一个执行单元，不是聊天助手。\n只输出一个 JSON 对象。不要代码围栏，不要解释，不要寒暄，不要在 JSON 前后添加任何字符。\n输出必须是统一信封格式：{\"meta\":{},\"data\":{},\"signals\":[],\"issues\":[]}。\n  meta   放置 confidence（0-1 的自评置信度）与你认为重要的元信息；\n  data   放置本节点的实质产出，必须严格符合下方给出的输出契约；\n  signals 放置你判断应当触发的下游信号名，只能从「可用信号」中选择；\n  issues 放置你发现的问题，格式 {\"severity\":\"low|medium|high|critical\",\"where\":\"\",\"msg\":\"\"}。\n证据不足时，把对应字段置为 null 并在 issues 中说明，绝不允许编造。\n如果输入自相矛盾，不要自行折中，必须在 issues 中显式指出冲突。\n你是一个可被逐步观察的执行单元：整条链的运行过程（每个节点的触发、输入、产出、信号）都会被追踪器记录并可逐步复盘，不要把中间过程当黑箱。\n【你的角色】patcher\n【你的职责】只修评审明确指出的问题，逐条回应。你认为不该改的要放进 rejected 并说明理由，不要沉默地忽略。\n【所属链的意图】造一条把长文生成摘要的链\n【本链的设计原则】\n  1. 每个阶段必须有可被 Schema 校验的产出。\n  2. 证据不足返回 null 并报 issue，不臆造。\n  3. 相邻阶段之间必须有真实信息增量。\n  4. 每个节点执行后必须产生可观测的逐步反馈（通过信号与追踪器暴露本步的操作与产出），整条链的运行过程可被逐步复盘，不能是黑箱。\n【可用信号】revise.done\n【输出契约 data 必须满足】\n  - patched (any, 必填)\n  - applied (array, 可选)\n  - rejected (array, 可选)",
+        "user": "【总目标】\n{{$.intake.goal}}\n\n【本阶段任务】\n逐条修复评审指出的缺陷。不同意的要放进 rejected 并说明理由\n\n【上游产出】\n【原产出】\n{{$.summarize}}\n\n【评审意见】\n{{$.review}}\n\n【最终验收条件】\n1. 每个阶段产出符合其输出契约\n2. 最终产出覆盖全部验收条件\n3. 链在预算内自然终止\n4. 运行过程每一步都可被追踪与反馈，而非黑箱执行。\n\n现在输出你的 JSON 信封。"
+      },
+      "expect": {
+        "type": "object",
+        "required": [
+          "patched"
+        ],
+        "properties": {
+          "patched": {},
+          "applied": {
+            "type": "array"
+          },
+          "rejected": {
+            "type": "array"
+          }
+        }
+      },
+      "temperature": 0.2,
+      "retry": {
+        "max": 1,
+        "onExhausted": "passthrough"
+      },
+      "out": "$.revised",
+      "emit": [
+        "revise.done"
+      ],
+      "declares": [
+        "revise.done"
+      ],
+      "maxRuns": 2
+    },
+    {
+      "id": "assert",
+      "kind": "fn",
+      "title": "交付前独立断言",
+      "use": "assert",
+      "trigger": [
+        {
+          "on": "signal.quality.pass"
+        },
+        {
+          "on": "signal.quality.exhausted"
+        }
+      ],
+      "in": {
+        "conditions": [
+          {
+            "expr": "$.summarize != null",
+            "msg": "摘要产出为空",
+            "where": "summarize",
+            "severity": "high"
+          },
+          {
+            "expr": "$.summarize.oneline != null",
+            "msg": "一句话摘要缺失",
+            "where": "summarize",
+            "severity": "high"
+          },
+          {
+            "expr": "$.review.score >= 0.6",
+            "msg": "质量评分过低",
+            "where": "review",
+            "severity": "medium"
+          }
+        ]
+      },
+      "out": "$.assert",
+      "emit": [
+        "assert.passed",
+        "assert.failed"
+      ],
+      "declares": [
+        "assert.passed",
+        "assert.failed"
+      ]
+    },
+    {
+      "id": "evidence",
+      "kind": "fn",
+      "title": "证据层军报：归档原始产物 + Hash + 可重跑命令（机器出，不可编造）",
+      "use": "evidence",
+      "trigger": [
+        {
+          "on": "signal.assert.passed"
+        },
+        {
+          "on": "signal.assert.failed"
+        }
+      ],
+      "out": "$.evidence",
+      "emit": [
+        "evidence.done"
+      ],
+      "declares": [
+        "evidence.done"
+      ],
+      "in": {
+        "artifacts": {
+          "harvest": "$.harvest",
+          "outline": "$.outline",
+          "summarize": "$.summarize",
+          "review": "$.review",
+          "revise": "$.revised"
+        }
+      }
+    },
+    {
+      "id": "deliver",
+      "kind": "fn",
+      "title": "收敛交付（叙述层 + 证据层 + 完成包）",
+      "use": "deliver",
+      "trigger": [
+        {
+          "on": "signal.assert.passed"
+        },
+        {
+          "on": "signal.assert.failed"
+        }
+      ],
+      "in": {
+        "answer": "=coalesce($.revised.patched, $.summarize)",
+        "artifacts": {
+          "harvest": "$.harvest",
+          "outline": "$.outline",
+          "summarize": "$.summarize"
+        },
+        "quality": "$.review",
+        "completionPackage": {
+          "scope": "长文本的分段摘要与收敛",
+          "changeScope": "本次运行实际触达的节点与产物见 artifacts；未触达的分支不在本次交付范围内。",
+          "designRationale": "四层治理骨架：战略层由链头 intent/principle/acceptance/redlines/boundaries 固定；建制层由 trigger 拓扑 + budget + maxRuns 约束；战术层 AI 在边界内执行，越界经 clarify 交回人；裁决层由 redlines / review / evidence / assert 四道机器门判定，不接受 AI 自证。",
+          "risks": "$.review.weaknesses",
+          "acceptanceCommand": "=\"node src/cli.js run gen.summarize --goal \\\"\" + coalesce($.intake.goal, \"\") + \"\\\"\"",
+          "verificationResults": "$.evidence.gates",
+          "regressionCompatibility": "链头 regressionTests 共 4 条；治理基线注入只新增护栏与证据节点、不改变原有阶段语义，回归口径不变。",
+          "issuesAndMethods": "$.assert.issues",
+          "openItems": "$.review.suggestions",
+          "nextSteps": [
+            "按 review 指出的 weaknesses 逐条修复后重跑",
+            "若本次有未完成项（openItems），先补足再进入下一阶段",
+            "用 gen.chain-governance 定期审查本链治理覆盖度"
+          ],
+          "artifactsHash": "=$.evidence.hashes",
+          "narrative": {
+            "layer": "叙述层（AI 写给人看）",
+            "note": "以下由模型总结，供人快速决策：干了什么、卡在哪、需要你定什么。可读性优先，不作为验收依据。",
+            "summary": "=coalesce($.revised.patched, $.review.summary, \"见 answer\")"
+          },
+          "evidence": {
+            "layer": "证据层（机器统计，不可编造）",
+            "note": "以下全部由 fn 节点确定性生成，模型无法改写；验收以本层为准。",
+            "runId": "$.evidence.runId",
+            "command": "$.evidence.command",
+            "gates": "$.evidence.gates",
+            "hashes": "=$.evidence.hashes",
+            "assertions": "$.assert"
+          }
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "deliver.done",
+        "chain.end"
+      ]
+    }
+  ]
+}

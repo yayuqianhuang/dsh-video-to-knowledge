@@ -1,0 +1,398 @@
+{
+  "id": "gen.identity-bootstrap",
+  "title": "身份初始化引导（init 表单 + apply 落盘 + 收尾删引导文件）",
+  "version": "0.3.0",
+  "tier": "combat",
+  "intent": "把 BOOTSTRAP.md 的“身份初始化”收尾动作固化为一条可复用触发链：init 阶段由 identity-architect 把用户填写的表单（名字/风格/偏好/项目）结构化为身份数据，apply 阶段由确定性 fn 落盘到 SOUL.md/IDENTITY.md/USER.md 并删除 BOOTSTRAP.md，全程事件驱动、可被逐步复盘。",
+  "principle": [
+    "逐步反馈：每个节点执行后产出自观测信号与产出，整条链可被逐步复盘。",
+    "apply 阶段的磁盘写入由确定性 fn 完成（而非模型），保证落盘结果可测、可重放、不依赖 API。",
+    "战略层（意图 / 原则 / 验收 / 红线 / 边界）由人设定，AI 只能执行与追问，不得自行改写或降低标准。",
+    "触碰红线，或意图模糊却指向高危动作（删除 / 重写 / 迁移 / 资金 / 越权）时，必须停下来交回人裁定，不得单方推进。",
+    "证据不足时返回 null 并报 issue，绝不臆造；每条结论都要能指回具体产物或统计。"
+  ],
+  "acceptance": [
+    "运行后 SOUL.md / IDENTITY.md / USER.md 被填充且保留各自模板结构；",
+    "BOOTSTRAP.md 被删除；",
+    "运行过程每一步（intake→form→applyIdentity→removeBootstrap→deliver）均可被追踪与反馈。",
+    "产出符合各节点声明的输出契约（expect），无契约违例。",
+    "链在预算内自然终止（走到 halt 节点），而非被熔断或耗尽预算。"
+  ],
+  "redlines": [
+    "AI 不得单方定义或降低成功标准",
+    "AI 不得伪造证据、编造数据或结果",
+    "不得跳过任何验收门（review / assert / 回归）",
+    "不得越出本链声明的作战边界，侵入不归本链管辖的系统或数据",
+    "不得删除或覆盖运行证据与追踪记录"
+  ],
+  "boundaries": {
+    "owns": "把 BOOTSTRAP.md 的“身份初始化”收尾动作固化为一条可复用触发链：init 阶段由 identity-architect 把用户填写的表单（名字/风格/偏好/项目）结构化为身份数据，apply 阶段由确定性 fn 落盘到 SOUL.md/IDENTITY.md/USER.md 并删除 BOOTSTRAP.md，全程事件驱动、可被逐步复盘。",
+    "notOwns": [
+      "战略目标与验收标准的设定（属人，AI 只能执行与追问）",
+      "超出本链 intent 声明范围的系统、代码与数据",
+      "删除 / 迁移 / 资金 / 对外承诺等不可逆动作的最终决策"
+    ],
+    "escalateTo": "战略层（人）—— 经 clarify 护栏发 clarify.block，由 bail 收口交回"
+  },
+  "budget": {
+    "maxSteps": 40,
+    "maxLlmCalls": 10,
+    "maxTokens": 80000,
+    "maxWallMs": 600000,
+    "maxNodeRuns": 4
+  },
+  "regressionTests": [
+    {
+      "id": "RT-IDENTITY-1",
+      "type": "happy",
+      "input": "一个本链 intent 范围内、目标明确的正常请求",
+      "expect": "链走完主干阶段并从 deliver 终止，output.completionPackage 字段齐全，evidence.hashes 非空",
+      "rationale": "主路径必须可达终点，这是所有其他用例的前提"
+    },
+    {
+      "id": "RT-IDENTITY-2",
+      "type": "guard",
+      "input": "空目标或只有一句无法执行的模糊话",
+      "expect": "intake 判非法 → intake.invalid → bail 终止，不进入任何 llm 节点",
+      "rationale": "垃圾输入不该烧预算"
+    },
+    {
+      "id": "RT-IDENTITY-3",
+      "type": "governance",
+      "input": "含高危不可逆措辞的目标（如「删掉现有实现从零重写」）",
+      "expect": "clarify 判为 (B) 并 emit clarify.block → bail 拦截；接真实模型时须拦住，mock 下因占位放行须以真实模型复验",
+      "rationale": "护栏形同虚设是本框架最贵的失败模式"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "intake",
+      "kind": "fn",
+      "title": "入口归一化（表单原文）",
+      "use": "intake",
+      "trigger": [
+        {
+          "on": "chain.start"
+        }
+      ],
+      "in": {
+        "raw": "$.input"
+      },
+      "out": "$.intake",
+      "declares": [
+        "intake.ready",
+        "intake.invalid"
+      ]
+    },
+    {
+      "id": "clarify",
+      "kind": "llm",
+      "title": "防误解护栏（高危意图澄清 · 不可逆动作交回人裁定）",
+      "role": "intent-guard",
+      "trigger": [
+        {
+          "on": "signal.intake.ready"
+        }
+      ],
+      "prompt": {
+        "system": "你是一条 AI JSON 触发链上的执行单元（intent-guard / 防误解护栏）。\n只输出一个 JSON 对象。不要代码围栏，不要解释，不要寒暄。\n输出必须是统一信封格式：{\"meta\":{},\"data\":{},\"signals\":[],\"issues\":[]}。\n\n【你的职责】在链进入实质执行之前，澄清用户的真实意图，拦截「AI 单方执行不可逆高危动作」的风险。\n你不制定计划、不产出业务结果、不替人做战略决策。\n\n【高危意图清单】用户目标或约束中出现以下任一指向时，视为待澄清：\n- 覆盖已存在的身份文件\n- 清空用户既有偏好记录\n\n【三种判别】\n(A) 目标明确且不触及高危动作 → 直接放行。\n(A2) 触及高危措辞，但用户已明确声明「保留现有 / 不删 / 存量不动 / 平行新增」等可逆口径 → 放行，并在 note 中记录已确认的可逆口径。\n(B) 明确指向不可逆高危动作（真删除 / 真重写 / 真迁移 / 真付款），且没有人给出显式授权 → 拦截。\n\n【你的动作】\n- (A) / (A2) → emit \"clarify.done\"，data.verdict 写 \"pass\"，data.note 说明判别依据。\n- (B) → emit \"clarify.block\"，data.verdict 写 \"block\"；data.note 写明：该意图属不可逆高危动作，依「带 AI 打仗」四层治理须上交战略层（人）裁定，\n  并要求人在 boundaries / constraints 中显式授权（override）后方可继续。AI 不得单方决定执行。边界依据：本链声明的 $.boundaries。\n\n【判定尺度】措辞模糊时优先放行并在 note 标注「待人确认口径」；只有表述明确指向 (B) 才拦截。宁可多问一句，不可少拦一次。",
+        "user": "【用户原始目标】\n{{$.intake.goal}}\n\n【原始输入】\n{{$.input}}\n\n【人定成功标准】\n{{$.intake.successCriteria}}\n\n【人定禁区】\n{{$.intake.boundaries}}\n\n【人定约束】\n{{$.intake.constraints}}\n\n判断上述输入属于 (A) 安全 / (A2) 高危措辞但口径可逆 / (B) 不可逆高危动作 中的哪一种。\n按判别结果在 signals 中 emit 对应信号（clarify.done 或 clarify.block），并在 data 中给出 verdict / intent / note。"
+      },
+      "expect": {
+        "type": "object",
+        "properties": {
+          "verdict": {
+            "type": "string"
+          },
+          "intent": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      },
+      "temperature": 0.1,
+      "retry": {
+        "max": 1,
+        "onExhausted": "throw"
+      },
+      "out": "$.clarify",
+      "emit": [
+        "clarify.done"
+      ],
+      "declares": [
+        "clarify.done",
+        "clarify.block"
+      ],
+      "maxRuns": 2
+    },
+    {
+      "id": "redlines",
+      "kind": "fn",
+      "title": "红线门：禁止 AI 越权 / 伪造 / 跳门 / 越界 / 丢证据",
+      "use": "redlines",
+      "trigger": [
+        {
+          "on": "signal.clarify.done"
+        }
+      ],
+      "out": "$.redlines",
+      "declares": [
+        "redlines.pass",
+        "redlines.fail"
+      ],
+      "maxRuns": 2
+    },
+    {
+      "id": "bail",
+      "kind": "fn",
+      "title": "触碰红线或高危意图待裁定，提前终止",
+      "use": "deliver",
+      "trigger": [
+        {
+          "on": "signal.clarify.block"
+        },
+        {
+          "on": "signal.redlines.fail"
+        }
+      ],
+      "in": {
+        "answer": null,
+        "quality": {
+          "aborted": true,
+          "reason": "触碰红线，或意图指向不可逆高危动作，已交回战略层（人）裁定"
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "chain.end"
+      ]
+    },
+    {
+      "id": "form",
+      "kind": "llm",
+      "title": "init·结构化身份表单",
+      "role": "identity-architect",
+      "trigger": [
+        {
+          "on": "signal.redlines.pass"
+        }
+      ],
+      "prompt": {
+        "system": "你是身份架构师。用户会给你一段已填写的初始化表单（名字、风格、偏好、项目等）。请把它结构化为严格的 JSON 信封，data 含 agent/user/preferences/projects/soul 字段，作为 apply 阶段落盘的依据。完成后发出信号 identity.collected。",
+        "user": "【已填写的初始化表单】\n{{$.intake.goal}}\n\n【要求】只输出 JSON 信封，data 形如：\n{ \"agent\": { \"name\", \"nature\", \"vibe\", \"emoji\" }, \"user\": { \"name\", \"alias\", \"pronouns\", \"city\", \"notes\", \"context\" }, \"preferences\": [string], \"projects\": [string], \"soul\": string }。字段缺失时给合理缺省，不要留空键。"
+      },
+      "expect": {
+        "type": "object",
+        "required": [
+          "agent"
+        ],
+        "properties": {}
+      },
+      "temperature": 0.2,
+      "retry": {
+        "max": 2,
+        "onExhausted": "throw"
+      },
+      "out": "$.identity",
+      "emit": [
+        "identity.collected"
+      ],
+      "declares": [
+        "identity.collected"
+      ],
+      "maxRuns": 4
+    },
+    {
+      "id": "validate",
+      "kind": "fn",
+      "title": "校验身份数据最小契约",
+      "use": "assert",
+      "trigger": [
+        {
+          "on": "signal.identity.collected"
+        }
+      ],
+      "in": {
+        "conditions": [
+          {
+            "expr": "$.identity.agent != null",
+            "msg": "agent 对象缺失",
+            "severity": "high"
+          },
+          {
+            "expr": "len($.identity.agent.name) > 0",
+            "msg": "agent.name 为空",
+            "severity": "high"
+          }
+        ]
+      },
+      "out": "$.validation",
+      "emit": [
+        "identity.validated"
+      ],
+      "declares": [
+        "identity.validated",
+        "assert.passed",
+        "assert.failed"
+      ]
+    },
+    {
+      "id": "applyIdentity",
+      "kind": "fn",
+      "title": "apply·落盘身份文件",
+      "use": "applyIdentity",
+      "trigger": [
+        {
+          "on": "signal.identity.validated"
+        }
+      ],
+      "in": {
+        "identity": "$.identity"
+      },
+      "out": "$.applyResult",
+      "emit": [
+        "identity.applied"
+      ],
+      "declares": [
+        "identity.applied"
+      ]
+    },
+    {
+      "id": "removeBootstrap",
+      "kind": "fn",
+      "title": "apply·删除引导文件 BOOTSTRAP.md",
+      "use": "removeBootstrap",
+      "trigger": [
+        {
+          "on": "signal.identity.applied"
+        }
+      ],
+      "in": {
+        "baseDir": "$.applyResult.dir"
+      },
+      "out": "$.removeResult",
+      "emit": [
+        "bootstrap.removed"
+      ],
+      "declares": [
+        "bootstrap.removed"
+      ]
+    },
+    {
+      "id": "evidence",
+      "kind": "fn",
+      "title": "证据层军报：归档原始产物 + Hash + 可重跑命令（机器出，不可编造）",
+      "use": "evidence",
+      "trigger": [
+        {
+          "on": "signal.bootstrap.removed"
+        }
+      ],
+      "out": "$.evidence",
+      "emit": [
+        "evidence.done"
+      ],
+      "declares": [
+        "evidence.done"
+      ],
+      "in": {
+        "artifacts": {
+          "form": "$.identity",
+          "validate": "$.validation",
+          "applyIdentity": "$.applyResult",
+          "removeBootstrap": "$.removeResult"
+        }
+      }
+    },
+    {
+      "id": "qualityGate",
+      "kind": "gate",
+      "title": "质量闸门（证据完整性）",
+      "trigger": [
+        {
+          "on": "signal.evidence.done"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.evidence != null && len($.evidence.hashes) >= 1",
+          "emit": "quality.pass",
+          "label": "证据完整",
+          "reason": "证据包已生成且 Hash 非空"
+        },
+        {
+          "when": "empty($.evidence.hashes)",
+          "emit": "quality.fail",
+          "label": "证据缺失",
+          "reason": "证据 Hash 为空，产出无法验真"
+        }
+      ],
+      "default": "quality.fail",
+      "declares": [
+        "quality.pass",
+        "quality.fail"
+      ]
+    },
+    {
+      "id": "deliver",
+      "kind": "fn",
+      "title": "收敛交付（叙述层 + 证据层 + 完成包）",
+      "use": "deliver",
+      "trigger": [
+        {
+          "on": "signal.quality.pass"
+        },
+        {
+          "on": "signal.quality.fail"
+        }
+      ],
+      "in": {
+        "answer": "$.applyResult",
+        "artifacts": {
+          "apply": "$.applyResult",
+          "remove": "$.removeResult"
+        },
+        "completionPackage": {
+          "scope": "首次运行时采集并落盘助手与用户身份",
+          "changeScope": "本次运行实际触达的节点与产物见 artifacts；未触达的分支不在本次交付范围内。",
+          "designRationale": "四层治理骨架：战略层由链头 intent/principle/acceptance/redlines/boundaries 固定；建制层由 trigger 拓扑 + budget + maxRuns 约束；战术层 AI 在边界内执行，越界经 clarify 交回人；裁决层由 redlines / review / evidence / assert 四道机器门判定，不接受 AI 自证。",
+          "risks": [],
+          "acceptanceCommand": "=\"node src/cli.js run gen.identity-bootstrap --goal \\\"\" + coalesce($.intake.goal, \"\") + \"\\\"\"",
+          "verificationResults": "$.evidence.gates",
+          "regressionCompatibility": "链头 regressionTests 共 0 条；治理基线注入只新增护栏与证据节点、不改变原有阶段语义，回归口径不变。",
+          "issuesAndMethods": "$.validation.issues",
+          "openItems": [],
+          "nextSteps": [
+            "按 review 指出的 weaknesses 逐条修复后重跑",
+            "若本次有未完成项（openItems），先补足再进入下一阶段",
+            "用 gen.chain-governance 定期审查本链治理覆盖度"
+          ],
+          "artifactsHash": "=$.evidence.hashes",
+          "narrative": {
+            "layer": "叙述层（AI 写给人看）",
+            "note": "以下由模型总结，供人快速决策：干了什么、卡在哪、需要你定什么。可读性优先，不作为验收依据。",
+            "summary": "见 answer"
+          },
+          "evidence": {
+            "layer": "证据层（机器统计，不可编造）",
+            "note": "以下全部由 fn 节点确定性生成，模型无法改写；验收以本层为准。",
+            "runId": "$.evidence.runId",
+            "command": "$.evidence.command",
+            "gates": "$.evidence.gates",
+            "hashes": "=$.evidence.hashes",
+            "assertions": "$.validation"
+          }
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "deliver.done",
+        "chain.end"
+      ]
+    }
+  ]
+}
