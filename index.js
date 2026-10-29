@@ -275,10 +275,15 @@ async function runPy(scriptName, args, { workDir, cookiesPath, timeoutMs } = {})
       error: (r.stderr || r.stdout || '').trim().split(/\r?\n/).slice(-12).join('\n') || '(无输出)',
     }
   }
+  const text = (r.stdout || '').trim()
+  if (!text) return { ok: true, data: null, text: '' }
   try {
-    return { ok: true, data: JSON.parse(r.stdout) }
+    return { ok: true, data: JSON.parse(text), text }
   } catch {
-    return { ok: false, error: `脚本 ${scriptName} 的 stdout 不是合法 JSON`, raw: r.stdout.slice(-500) }
+    // 部分脚本（如 vk_pipeline.py build）只输出人类可读日志、不产出 JSON。
+    // 退出码 0 即视为成功；结果以落盘产物（manifest.json / by_p/）为准。
+    const lines = text.split(/\r?\n/).filter(Boolean)
+    return { ok: true, data: null, text, lastLine: lines[lines.length - 1] || '', nonJson: true }
   }
 }
 
