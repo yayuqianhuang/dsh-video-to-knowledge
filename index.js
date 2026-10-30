@@ -446,12 +446,46 @@ export function apply(ctx) {
         )
       }
       const d = r.data
+
+      // 字幕轨探测：抽检首/末分 P，几秒出结果；避免用户跑到 vk_prepare 才发现没字幕
+      let subsText = null
+      let subsData = null
+      if (url) {
+        const s = await runPy('vk_chain.py', ['subs', '--url', url],
+          { workDir: wd, cookiesPath: ck, timeoutMs: 180_000 })
+        if (s.ok && s.data) {
+          subsData = s.data
+          const n = s.data.probedParts
+          if (s.data.verdict === 'ok') {
+            subsText = `可用（抽检 ${s.data.withSubs}/${n} 个分 P，语言 ${(s.data.langs || []).join('/')}）`
+          } else if (s.data.verdict === 'none') {
+            const loginBad = d.biliLogin === 'expired' || d.biliLogin === 'invalid'
+            subsText = `不可用（抽检 ${n} 个分 P 只有 ${(s.data.langs || []).join('/') || '无'}）`
+              + (loginBad
+                ? ' → 但登录态无效，B 站对未登录用户不下发字幕列表，**这一项要先修登录再判断**'
+                : ' → 若播放器里能看到中文字幕，那是硬字幕（烧在画面里），只能 ASR/OCR，或换有 ai-zh 字幕轨的视频')
+          } else {
+            subsText = '无法判定（yt-dlp 没返回字幕信息）'
+          }
+        } else {
+          subsText = `探测失败：${s.error}`
+        }
+      }
+
       const lines = [
         `Python      ${py}`,
         `yt-dlp      ${d.ytdlp ? d.ytdlpPath : '缺失'}`,
         `ffmpeg      ${d.ffmpeg ? d.ffmpegPath : '缺失（仅本地 ASR 需要）'}`,
         `whisper     ${d.whisper ? '可用' : '不可用（仅本地 ASR 需要）'}`,
-        `B站登录态   ${d.biliLogin}（模式 ${d.credMode}）`,
+        `B站登录态   ${(() => {
+          const s = d.biliLogin
+          const p = d.biliLoginProbe || {}
+          if (s === 'valid') return `valid（已联网确认${p.uname ? '：' + p.uname : ''}）`
+          if (s === 'expired') return '已过期（文件里有 SESSDATA，但 B 站已认为未登录）→ 重新导出 cookie 后调 vk_login'
+          if (s === 'unverified') return '未验证（有 cookie 文件，但联网校验失败）'
+          if (s === 'cached') return 'cached（走本地缓存，未联网校验）'
+          return '缺失（未提供 cookie）'
+        })()}（模式 ${d.credMode}）`,
         `缺失项      ${d.missing.length ? d.missing.join(', ') : '无'}`,
         `工作目录    ${wd}`,
         `配置文件    ${CONFIG_FILE}${existsSync(CONFIG_FILE) ? '' : '（尚未创建，可用 vk_config 写）'}`,
@@ -459,9 +493,10 @@ export function apply(ctx) {
       if (d.missing.length) {
         lines.push('', '修复建议：')
         if (d.missing.includes('yt-dlp')) lines.push('· 安装 yt-dlp：pip install -U yt-dlp')
-        if (d.missing.includes('biliLogin')) lines.push('· 提供 B 站 cookie：用浏览器扩展导出 Netscape 格式，保存为文件后通过 cookiesPath 传入')
+        if (d.missing.includes('biliLogin')) lines.push('· B 站 cookie 缺失或已过期：重新导出 Netscape 格式文件，然后调 vk_login 登记（浏览器能看到 AI 字幕但插件只看到弹幕，多半就是过期）')
       }
-      return textResult(lines.join('\n') + '\n\n' + j(d))
+      if (subsText !== null) lines.splice(5, 0, `字幕轨      ${subsText}`)
+      return textResult(lines.join('\n') + '\n\n' + j({ ...d, subs: subsData }))
     },
   })
 

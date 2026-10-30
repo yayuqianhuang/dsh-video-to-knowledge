@@ -538,7 +538,9 @@ def cmd_build(args):
 # ---------------------------------------------------------------- finalize / check
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.S)
-TAG_RE = re.compile(r"\[(\d{1,2}:\d{2}(?::\d{2})?)\]")
+# 分钟位允许 1-3 位：累计时间轴超过 99 分钟后锚点形如 [112:25]，
+# 旧写法只认 \d{1,2}，会把这类卡片误判为"没有任何 [mm:ss] 锚点"。
+TAG_RE = re.compile(r"\[(\d{1,3}:\d{2}(?::\d{2})?)\]")
 
 
 def split_frontmatter(text):

@@ -530,7 +530,7 @@
       ],
       "over": "$.dedupe.queue",
       "use": "gen.video-to-knowledge.upload",
-      "limit": 20,
+      "limit": 200,
       "onItemError": "continue",
       "out": "$.uploadResults",
       "emit": [

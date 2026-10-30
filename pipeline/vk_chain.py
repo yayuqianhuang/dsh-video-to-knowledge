@@ -308,6 +308,58 @@ def cmd_credential(a):
     return emit(_credential())
 
 
+def _verify_bili_login(path, timeout=8):
+    """联网校验 cookie 是否仍然有效（B 站 nav 接口）。
+
+    _credential() 只判断文件里有没有 SESSDATA 字样——那只能说明"有凭据"，
+    不代表"登录态还有效"。SESSDATA 过期后文件仍含该字样，会误报 valid；
+    而 B 站对未登录用户不返回 AI 字幕，于是出现"浏览器能看到字幕、
+    yt-dlp 只有弹幕"的怪现象。
+
+    只返回布尔/状态码/uname，**绝不返回 cookie 值**。
+    """
+    if not path or not os.path.isfile(path):
+        return {"checked": False, "isLogin": False, "reason": "no-cookies"}
+    try:
+        jar = []
+        for line in open(path, encoding="utf-8", errors="replace"):
+            line = line.rstrip("\r\n")
+            if not line.strip():
+                continue
+            # Netscape 格式里 HttpOnly cookie 写成 "#HttpOnly_<domain> ..."，
+            # 这是**数据行**，不是注释——跳过它会把 SESSDATA 丢掉，导致误报未登录。
+            if line.startswith("#HttpOnly_"):
+                line = line[len("#HttpOnly_"):]
+            elif line.startswith("#"):
+                continue
+            p = line.split("\t")
+            if len(p) >= 7:
+                jar.append("%s=%s" % (p[5], p[6]))
+        if not jar:
+            return {"checked": False, "isLogin": False, "reason": "empty-jar"}
+
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.bilibili.com/x/web-interface/nav",
+            headers={
+                "Cookie": "; ".join(jar),
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Referer": "https://www.bilibili.com/",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        data = d.get("data") or {}
+        return {
+            "checked": True,
+            "isLogin": bool(data.get("isLogin")),
+            "code": d.get("code"),
+            "uname": data.get("uname") or None,
+        }
+    except Exception as e:
+        return {"checked": False, "isLogin": False, "reason": type(e).__name__}
+
+
 def cmd_doctor(a):
     url = a.url or ""
     platform = vp.platform_of(url) if url else a.platform
@@ -331,14 +383,22 @@ def cmd_doctor(a):
         cached = (os.path.isfile(os.path.join(vd, "meta.json"))
                   and os.path.isfile(os.path.join(vd, "transcript.jsonl")))
 
+    # 联网校验登录态：只看文件里有没有 SESSDATA 会误报（过期后字样仍在）
+    probe = (_verify_bili_login(cred.get("cookiesPath"))
+             if cred["loginState"] in ("valid", "partial") else
+             {"checked": False, "isLogin": False, "reason": "no-cookies"})
+
     if cred["loginState"] == "valid":
-        bili_login = "valid"
+        if probe.get("checked"):
+            bili_login = "valid" if probe.get("isLogin") else "expired"
+        else:
+            bili_login = "unverified"   # 有凭据，但没联上网/校验失败
     elif cached and a.allow_cached:
-        bili_login = "cached"          # 明确标注：走本地缓存，未联网校验登录态
+        bili_login = "cached"           # 明确标注：走本地缓存，未联网校验登录态
     else:
         bili_login = "invalid"
 
-    if platform == "bilibili" and bili_login == "invalid":
+    if platform == "bilibili" and bili_login in ("invalid", "expired"):
         missing.append("biliLogin")
 
     return emit({
@@ -350,6 +410,7 @@ def cmd_doctor(a):
         "platform": platform,
         "videoId": vid,
         "biliLogin": bili_login,
+        "biliLoginProbe": probe,
         "cached": cached and a.allow_cached,
         "credMode": cred["mode"],
         "missing": missing,
@@ -709,6 +770,55 @@ def cmd_outline(a):
 
 # ---------------------------------------------------------------- CLI
 
+def cmd_subs(a):
+    """探测字幕轨：抽检若干分 P，判断"这个视频能不能走链路"。
+
+    只读不写、几秒出结果。目的是把"没有字幕轨"这个常见死路提前暴露出来，
+    而不是等用户跑完 vk_prepare（下载+清洗）才失败。
+    """
+    url = a.url
+    ytdlp = vp.resolve_ytdlp(getattr(a, "ytdlp", None))
+    if not ytdlp:
+        die("找不到 yt-dlp")
+    cookies = a.cookies or os.environ.get("BILI_COOKIES") or os.environ.get("VK_COOKIES")
+
+    cmd = [ytdlp, "--no-warnings", "--list-subs", "--skip-download"]
+    items = getattr(a, "playlist_items", None)
+    if items:
+        cmd += ["--playlist-items", items]
+    if cookies and os.path.isfile(cookies):
+        cmd += ["--cookies", cookies]
+    cmd.append(url)
+
+    code, out, err = vp.run_cmd(cmd)
+
+    blocks, cur = {}, None
+    for line in out.splitlines():
+        m = re.search(r"Available subtitles for (\S+):", line)
+        if m:
+            cur = m.group(1)
+            blocks[cur] = []
+            continue
+        if cur is not None:
+            s = line.strip()
+            if s and not s.startswith("["):
+                tok = s.split()[0]
+                if tok.lower() not in ("language", "formats"):   # 跳过表头行
+                    blocks[cur].append(tok)
+
+    langs = sorted({l for v in blocks.values() for l in v})
+    usable = [k for k, v in blocks.items()
+              if any(l.lower().startswith(("ai-", "zh")) for l in v)]
+    emit({
+        "probedParts": len(blocks),
+        "withSubs": len(usable),
+        "samples": usable[:3],
+        "langs": langs,
+        "verdict": "ok" if usable else ("none" if blocks else "unknown"),
+        "exitCode": code,
+    })
+
+
 def main(argv=None):
     for s in (sys.stdout, sys.stderr):
         try:
@@ -739,6 +849,15 @@ def main(argv=None):
     t.add_argument("--sub-langs", default="ai-zh,zh-Hans,zh-CN")
     t.add_argument("--refresh", action="store_true")
     t.set_defaults(func=cmd_transcript)
+
+    sb = sub.add_parser("subs")
+    sb.add_argument("--url", required=True)
+    sb.add_argument("--cookies")
+    sb.add_argument("--ytdlp")
+    sb.add_argument("--playlist-items", default="1,-1",
+                    help="抽检哪些分 P（默认首个与末个）")
+    sb.set_defaults(func=cmd_subs)
+
 
     dd = sub.add_parser("dedupe")
     dd.add_argument("--card", required=True)

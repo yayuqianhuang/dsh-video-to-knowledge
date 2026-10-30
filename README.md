@@ -397,6 +397,7 @@ https://github.com/yayuqianhuang/dsh-video-to-knowledge/issues
 | 激活失败：`tool "x" parameters must be lossless JSON before schema projection` | 参数 schema 用了 `inputSchema` 字段名 | 宿主只读 `definition.parameters`；把 `inputSchema:` 改成 `parameters:`（`inputSchema` 是 MCP/Anthropic 约定，dsh 不认） |
 | `未找到 Python` | PATH 里没有可用解释器 | 设 `VK_PYTHON` 指向绝对路径 |
 | `抓字幕失败：...需要登录态` | 该视频 `need_login_subtitle` | 传 `cookiesPath` |
+| **浏览器能看到 AI 字幕，插件只有弹幕** | cookie 过期（文件里有 SESSDATA，但服务端已未登录） | `vk_doctor` 看 `B站登录态`：`expired` 就重新导出 cookie，再调 `vk_login` |
 | `does not look like a Netscape format` | cookie 文件带 BOM / 存成了提示语 | 重新导出，确认首行是 `# Netscape HTTP Cookie File` |
 | `quality.ok=false` | 卡片时间戳越界 / 字数不足 / frontmatter 缺 | 看 `quality.issues` |
 | `verify.ok=false` | 落盘有失败（看 `verify.failures`） | 检查 `kbPath` 可写 |
