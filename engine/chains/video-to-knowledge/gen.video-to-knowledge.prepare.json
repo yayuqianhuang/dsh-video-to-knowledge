@@ -14,7 +14,8 @@
   ],
   "acceptance": [
     "产出 $.meta（含 durationSec）与 $.transcript（含 coveredSec/segmentCount）",
-    "字幕覆盖率 <60% 或段数不足 → transcript.fail → 早停，不产出空卡片",
+    "字幕内容级校验：任一已写分 P 关键词命中 0 或出现异物词 → audit.mismatch",
+    "字幕不可用或串台 → 走 asrFallback；ASR 仍失败才早停，不产出空卡片",
     "清洗后产出 clean.jsonl + chunks[]，时间戳单调递增",
     "分块编译每个 [mm:ss] 均命中该块段表白名单，伪造条目剔除并计入 dropped",
     "产出 $.card 含 files[]、summary、timeline，正文带 [mm:ss] 锚点与 source_url#t=秒 深链"
@@ -31,12 +32,15 @@
     "redlines": "in: $.input{url,lang}；emit redlines.pass/redlines.fail",
     "fetchMeta": "in: $.input.url；out: $.meta；emit meta.ready",
     "acquireTranscript": "in: $.meta；out: $.transcript；emit transcript.ready",
-    "transcriptGate": "in: $.transcript + $.meta；emit transcript.ok/transcript.fail",
-    "prepareBail": "in: 失败信号；out: $.output；halt",
+    "transcriptGate": "in: $.audit + $.transcript + $.meta；emit transcript.ok/transcript.mismatch",
+    "prepareBail": "in: asr.failed / redlines.fail / clean.failed；out: $.output；halt",
     "cleanTranscript": "in: $.transcript；out: $.clean（含 chunks[]）；emit clean.ready",
     "compileLoop": "map over $.clean.chunks → 子链 gen.video-to-knowledge.chunk；out: $.chunks；emit compile.done",
     "synthesize": "in: $.chunks；out: $.card；emit card.ready",
-    "prepareDone": "in: $.card；out: $.output；halt"
+    "prepareDone": "in: $.card；out: $.output；halt",
+    "probeSubs": "in: $.meta；out: $.subsProbe；emit subs.probed/subs.thin",
+    "auditTranscript": "in: $.transcript + by_p/*.txt；out: $.audit；emit audit.done/audit.failed",
+    "asrFallback": "in: $.input.url + $.meta；out: $.asr；emit asr.done/asr.failed"
   },
   "regressionTests": [
     {
@@ -59,6 +63,20 @@
       "input": "字幕被限流降级（段数远少于 durationSec/120）",
       "expect": "覆盖率双校验不达标 → 判「假残缺」→ transcript.fail → 早停",
       "rationale": "限流返回的稀疏字幕必须被识别，不能当正常字幕编译"
+    },
+    {
+      "id": "RT-VK-PREPARE-4",
+      "type": "negative",
+      "input": "平台字幕时长对得上、内容却是另一支视频（实测：22 分钟 iPhone 评测混进史纲课）",
+      "expect": "auditTranscript 判 mismatch → asrFallback 转写 → 重新进入 clean；不得把评测文字当史纲考点入库",
+      "rationale": "只比时长的校验会放过同长度错轨，必须做内容级校验"
+    },
+    {
+      "id": "RT-VK-PREPARE-5",
+      "type": "edge",
+      "input": "B 站 player/v2 返回忽有忽无（同一分 P 多轮探测结果不一致）",
+      "expect": "probeSubs 多轮采样后给出 usable/missing；缺轨分 P 由 asrFallback 补齐",
+      "rationale": "单次探测不可信，实测需 2~8 轮才能拿全"
     }
   ],
   "budget": {
@@ -175,9 +193,95 @@
       }
     },
     {
+      "id": "probeSubs",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "字幕轨多轮探测：B 站 player/v2 返回不稳定，需多轮采样 + 按分 P 时长择优",
+      "trigger": [
+        {
+          "on": "signal.meta.ready"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/vk_chain.py probe --video-id <videoId> --rounds 8`：对每个分 P 反复查询 x/player/v2，只保留 max(end) 落在本 P 时长 85%~115% 的轨道，写成 runs/<videoId>/subs/NN_ai-zh.srt；输出 $.subsProbe={partCount,usable[],missing[],parts[],verdict}。退出码 5=NO_USABLE_SUBS。该节点只做侦察，不阻断主链（缺轨由后续 ASR 兜底）。",
+        "visible": "🔎 [probeSubs] 多轮探测平台字幕轨（返回不稳定，按 8 轮采样+时长择优）…",
+        "resultPath": "$.subsProbe"
+      },
+      "out": "$.subsProbe",
+      "maxRuns": 1,
+      "emit": [
+        "subs.probed"
+      ],
+      "declares": [
+        "subs.probed"
+      ],
+      "writes": [
+        "$.subsProbe"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "probe",
+          "--video-id",
+          "${$.meta.videoId}",
+          "--rounds",
+          "8"
+        ]
+      },
+      "onError": {
+        "emit": [
+          "subs.thin"
+        ]
+      }
+    },
+    {
+      "id": "auditTranscript",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "字幕内容校验：关键词命中 + 异物词，识别串台字幕",
+      "trigger": [
+        {
+          "on": "signal.transcript.ready"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/vk_chain.py audit --video-id <videoId>`：按分 P 标题里的章号取该章关键词表（如第一章：鸦片战争/虎门销烟/南京条约…），统计命中数与异物词（评测/iPhone/靶场…）；命中 ≥2 判 ok，1 判 weak，0 或有异物词判 mismatch。输出 $.audit={parts[],mismatched[],weak[],ok,verdict}。退出码 4=SUBTITLE_MISMATCH。**只比时长拦不住串台**——那支 iPhone 评测恰好也是 22 分钟，会全项通过。",
+        "visible": "🕵️ [auditTranscript] 字幕内容校验（关键词命中 / 异物词，防串台）…",
+        "resultPath": "$.audit"
+      },
+      "out": "$.audit",
+      "maxRuns": 2,
+      "emit": [
+        "audit.done"
+      ],
+      "declares": [
+        "audit.done"
+      ],
+      "writes": [
+        "$.audit"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "audit",
+          "--video-id",
+          "${$.meta.videoId}"
+        ]
+      },
+      "onError": {
+        "emit": [
+          "audit.failed"
+        ]
+      }
+    },
+    {
       "id": "transcriptGate",
       "kind": "gate",
-      "title": "字幕校验门 / 评审门（verify 覆盖率与段数）",
+      "title": "字幕校验门 / 评审门（覆盖率 + 内容是否串台）",
       "trigger": [
         {
           "on": "signal.transcript.ready"
@@ -185,27 +289,82 @@
       ],
       "cases": [
         {
-          "when": "$.meta.durationSec > 0 && $.transcript.segmentCount > 0 && $.transcript.coveredSec / $.meta.durationSec >= 0.6",
+          "when": "$.audit && $.audit.ok == true && $.meta.durationSec > 0 && $.transcript.segmentCount > 0 && $.transcript.coveredSec / $.meta.durationSec >= 0.6",
           "emit": "transcript.ok",
-          "label": "字幕可用",
+          "label": "字幕可用且内容对得上",
+          "reason": "覆盖率 ≥60%，且逐分 P 关键词命中校验通过"
+        },
+        {
+          "when": "!$.audit && $.meta.durationSec > 0 && $.transcript.segmentCount > 0 && $.transcript.coveredSec / $.meta.durationSec >= 0.6",
+          "emit": "transcript.ok",
+          "label": "字幕可用（未做内容校验时的旧判据）",
           "reason": "段落数 > 0 且时间轴覆盖 ≥ 60% 时长"
         }
       ],
       "out": "$.transcriptCheck",
-      "default": "transcript.fail",
+      "default": "transcript.mismatch",
       "declares": [
         "transcript.ok",
-        "transcript.fail"
+        "transcript.mismatch"
       ]
+    },
+    {
+      "id": "asrFallback",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "本地 ASR 兜底：逐分 P 转写，转完即删音频（不落库）",
+      "trigger": [
+        {
+          "on": "signal.transcript.mismatch"
+        },
+        {
+          "on": "signal.transcript.fail"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/vk_chain.py asr --video-id <videoId> --download --url <url>`：对缺字幕/串台的分 P，用 faster-whisper（int8/CPU）转写；音频只落临时目录、转完即删。faster-whisper 的 PyAV 解码在某些版本组合下会 TypeError，故内部统一用 ffmpeg 解码成 numpy。输出 $.asr={model,parts[],failed[],verdict}。退出码 6=ASR_UNAVAILABLE（缺依赖/模型），7=ASR_FAILED（部分或全部失败）。",
+        "visible": "🎙️ [asrFallback] 平台字幕不可用 → 本地 ASR 兜底（音频转完即删）…",
+        "resultPath": "$.asr"
+      },
+      "out": "$.asr",
+      "maxRuns": 1,
+      "emit": [
+        "asr.done"
+      ],
+      "declares": [
+        "asr.done",
+        "asr.failed"
+      ],
+      "writes": [
+        "$.asr"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "asr",
+          "--video-id",
+          "${$.meta.videoId}",
+          "--download",
+          "--url",
+          "${$.input.url}"
+        ]
+      },
+      "onError": {
+        "emit": [
+          "asr.failed"
+        ]
+      }
     },
     {
       "id": "prepareBail",
       "kind": "fn",
       "use": "deliver",
-      "title": "素材准备失败收口（0 副作用）",
+      "title": "素材准备失败收口（0 副作用；字幕缺失/串台且 ASR 也失败时）",
       "trigger": [
         {
-          "on": "signal.transcript.fail"
+          "on": "signal.asr.failed"
         },
         {
           "on": "signal.redlines.fail"
@@ -218,7 +377,7 @@
         "answer": null,
         "quality": {
           "aborted": true,
-          "reason": "素材准备阶段失败（transcript.fail / redlines.fail / clean.failed），未进入编译与落盘"
+          "reason": "素材准备阶段失败（asr.failed / redlines.fail / clean.failed），未进入编译与落盘"
         },
         "completionPackage": {
           "scope": "素材准备（抓元数据 → 取字幕）",
@@ -248,6 +407,9 @@
       "trigger": [
         {
           "on": "signal.transcript.ok"
+        },
+        {
+          "on": "signal.asr.done"
         }
       ],
       "in": {

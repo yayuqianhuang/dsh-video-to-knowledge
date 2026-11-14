@@ -85,10 +85,12 @@ check('vk_config unset', c5.content[0].text.includes('已移除'));
 for (const f of [
   'pipeline/vk_chain.py',
   'pipeline/vk_pipeline.py',
+  'pipeline/vk_signals.py',
   'pipeline/clean_transcript.py',
   'runner/exec-chain.mjs',
   'engine/src/cli.js',
   'engine/chains/video-to-knowledge/gen.video-to-knowledge.json',
+  'engine/chains/video-to-knowledge/gen.video-to-knowledge.prepare.json',
 ]) check(`file ${f}`, existsSync(join(ROOT, f)));
 
 /* 3b. 回归断言（来自真实反馈：这三处一旦被改回去，用户侧会静默坏掉） */
@@ -127,6 +129,39 @@ for (const f of allChains) {
   if (m) leaked.push(`${f}:${m.length}`);
 }
 check('no absolute drive paths in exec', leaked.length === 0, leaked.join(','));
+
+/* 4b. 信号节点齐全（实测教训：字幕串台 / 接口不稳定 / 无字幕，三条都要有兜底） */
+const prepPath = join(ROOT, 'engine', 'chains', 'video-to-knowledge',
+  'gen.video-to-knowledge.prepare.json');
+const prep = JSON.parse(readFileSync(prepPath, 'utf8'));
+const prepIds = prep.nodes.map((n) => n.id);
+for (const id of ['probeSubs', 'auditTranscript', 'asrFallback']) {
+  check(`signal node ${id}`, prepIds.includes(id));
+}
+const auditNode = prep.nodes.find((n) => n.id === 'auditTranscript');
+check('audit emits mismatch signal',
+  !!auditNode && JSON.stringify(auditNode).includes('audit.done'));
+const asrNode = prep.nodes.find((n) => n.id === 'asrFallback');
+check('asr triggered by mismatch or fail',
+  !!asrNode && ['transcript.mismatch', 'transcript.fail']
+    .every((s) => JSON.stringify(asrNode.trigger).includes(s)));
+const gate = prep.nodes.find((n) => n.id === 'transcriptGate');
+check('gate checks content not just coverage',
+  !!gate && JSON.stringify(gate).includes('$.audit.ok'));
+
+const mainIds = chain.nodes.map((n) => n.id);
+for (const id of ['templateParse', 'bookPlan']) {
+  check(`signal node ${id}`, mainIds.includes(id));
+}
+const tpl = chain.nodes.find((n) => n.id === 'templateParse');
+check('template node reads prompt', !!tpl && JSON.stringify(tpl).includes('input.prompt'));
+
+// 三个新命令必须真的注册进 CLI（不然节点 exec 会 127）
+const sigSrc = readFileSync(join(ROOT, 'pipeline', 'vk_signals.py'), 'utf8');
+for (const cmd of ['audit', 'probe', 'asr', 'template', 'bookplan']) {
+  check(`vk_signals registers ${cmd}`, sigSrc.includes(`"${cmd}"`) || sigSrc.includes(`'${cmd}'`));
+}
+check('chain imports vk_signals', chainSrc.includes('vk_signals'));
 
 /* 5. 列链 */
 const lc = await tools.get('ajtc_list_chains').execute({});

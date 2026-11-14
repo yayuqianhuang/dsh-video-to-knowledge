@@ -31,7 +31,8 @@
     "全链 LLM 调用 ≤ 12，无阶段超预算",
     "任一 gate 失败场景 0 次落盘（gate 前置）",
     "交付含 narrative + evidence 两层，evidence 可复算",
-    "SESSDATA 不进黑板/LLM/日志/git，仅注入 yt-dlp 子进程 env（D3/FR-14）"
+    "SESSDATA 不进黑板/LLM/日志/git，仅注入 yt-dlp 子进程 env（D3/FR-14）",
+    "识别「知识卡 + 参考书（简介/目录/正文/附录）」模板，并给出编/章骨架"
   ],
   "boundaries": {
     "owns": "单视频链接 → 带时间戳 Markdown 卡片 → kb/<collection>/ 落盘的离线编译链（检索/向量化/重排交 WorkBuddy 工作台，D9）。",
@@ -62,7 +63,9 @@
     "deliver": "in: $.verify 或 confirm.hold；out: $.output；halt",
     "qualityCheck": "in: $.card + $.meta；out: $.quality；emit quality.ready",
     "outlineGate": "in: $.intake.outlinePath；emit outline.need/outline.skip",
-    "outlineMerge": "in: $.card + $.intake.outlinePath；out: $.outline；emit outline.done"
+    "outlineMerge": "in: $.card + $.intake.outlinePath；out: $.outline；emit outline.done",
+    "templateParse": "in: $.input.prompt；out: $.template；emit template.parsed/template.none",
+    "bookPlan": "in: $.card + meta；out: $.bookPlan；emit bookplan.ready"
   },
   "regressionTests": [
     {
@@ -148,7 +151,7 @@
       "id": "intake",
       "kind": "fn",
       "use": "set",
-      "title": "归一化入参（mode 缺省=dryRun，lang 缺省=zh-CN，collection 缺省=default，outlinePath 可选：给了就把卡片要点回写该大纲）",
+      "title": "归一化入参（mode 缺省=dryRun，lang 缺省=zh-CN，collection 缺省=default；prompt 可选=原始提示词，用于识别「沉淀知识卡+整合参考书」模板）",
       "trigger": [
         {
           "on": "chain.start"
@@ -162,7 +165,8 @@
           "lang": "=$.input.lang",
           "mode": "=$.input.mode",
           "outlinePath": "=$.input.outlinePath",
-          "videoId": "=$.input.videoId"
+          "videoId": "=$.input.videoId",
+          "prompt": "=$.input.prompt"
         }
       },
       "out": "$.intake",
@@ -368,6 +372,49 @@
       ]
     },
     {
+      "id": "templateParse",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "识别提示词模板：把这个视频…沉淀成知识卡，并整合成一本参考书（简介+目录+正文+附录）",
+      "trigger": [
+        {
+          "on": "signal.intake.ready"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/vk_chain.py template --prompt <$.input.prompt>`：从用户原话里抽出视频号/链接、标题与交付形态。识别到「参考书 + 简介/目录/正文/附录」即 deliverable=book，并给出 sections[]；只提到知识卡则 deliverable=cards。输出 $.template={recognized,videoId,url,titleHint,deliverable,sections[],verdict}。未给 prompt 时该节点跳过（不阻断），沿用 $.input.url。",
+        "visible": "🧭 [templateParse] 识别提示词模板（知识卡 / 参考书，四段结构）…",
+        "resultPath": "$.template"
+      },
+      "out": "$.template",
+      "maxRuns": 1,
+      "emit": [
+        "template.parsed"
+      ],
+      "declares": [
+        "template.parsed",
+        "template.none"
+      ],
+      "writes": [
+        "$.template"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "template",
+          "--prompt",
+          "${$.input.prompt}"
+        ]
+      },
+      "onError": {
+        "emit": [
+          "template.none"
+        ]
+      }
+    },
+    {
       "id": "prepare",
       "kind": "chain",
       "use": "gen.video-to-knowledge.prepare",
@@ -388,6 +435,50 @@
         "prepare.ok",
         "prepare.failed"
       ]
+    },
+    {
+      "id": "bookPlan",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "参考书骨架：按 meta 与已写卡片给出编/章数量（正文仍由模型写）",
+      "trigger": [
+        {
+          "on": "signal.prepare.ok"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/vk_chain.py bookplan --video-id <videoId> --cards-dir cards`：读 meta.parts 与 cards/card-<vid>-pNN.md，统计每张卡的核心要点数与关键概念数，给出 $.bookPlan={sections[简介,目录,正文,附录],bianCount,chapterCount,parts[],ready}。只做确定性估算，不生成正文；正文由模型按编写、再走排版脚本产出 DOCX/PDF。",
+        "visible": "📚 [bookPlan] 估算参考书骨架（编/章数、四段结构）…",
+        "resultPath": "$.bookPlan"
+      },
+      "out": "$.bookPlan",
+      "maxRuns": 1,
+      "emit": [
+        "bookplan.ready"
+      ],
+      "declares": [
+        "bookplan.ready"
+      ],
+      "writes": [
+        "$.bookPlan"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/vk_chain.py",
+        "cwd": "${workDir}",
+        "args": [
+          "bookplan",
+          "--video-id",
+          "${$.card.videoId}",
+          "--cards-dir",
+          "cards"
+        ]
+      },
+      "onError": {
+        "emit": [
+          "bookplan.failed"
+        ]
+      }
     },
     {
       "id": "qualityCheck",

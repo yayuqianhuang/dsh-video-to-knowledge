@@ -914,6 +914,13 @@ def main(argv=None):
     o.add_argument("--dry-run", action="store_true")
     o.set_defaults(func=cmd_outline)
 
+    # 信号节点的确定性内核：audit / probe / asr（见 vk_signals.py 顶部说明）
+    try:
+        import vk_signals
+        vk_signals.build_parser(sub)
+    except Exception as e:  # 缺依赖不影响既有命令
+        sys.stderr.write("WARN: vk_signals 未注册（%s）\n" % e)
+
     a = ap.parse_args(argv)
     os.makedirs(a.workdir, exist_ok=True)
     if getattr(a, "out", None):

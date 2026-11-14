@@ -116,6 +116,7 @@ dsh plugin --profile web list          # 应能看到 dsh-video-to-knowledge
 | 你想干什么 | 说这句话 |
 |---|---|
 | **全流程沉淀一张卡** | 「把这个视频沉淀成知识卡：`<链接>`」 |
+| **知识卡 + 一本参考书** | 「把这个视频（标题）沉淀成知识卡，并整合知识卡形成一本包含视频中所讲解所有概念的参考书（简介+目录+正文+附录）：`<链接>`」 |
 | **卡片 + 大纲骨干完整版** | 「沉淀成知识卡，**另外再给一份《大纲与骨干》完整版**：`<链接>`」 |
 | **只要大纲/骨干，不落库** | 「分析这个视频的大纲和骨干，先不落库：`<链接>`」 |
 | **批量处理** | 「依次把这三个链接沉淀进 kb：`<链接1>` `<链接2>` `<链接3>`」 |
@@ -127,11 +128,26 @@ dsh plugin --profile web list          # 应能看到 dsh-video-to-knowledge
 
 ```text
 "沉淀成知识卡"  → vk_doctor → vk_prepare →（模型写 cards/）→ vk_run → kb/<collection>/
+"整合成一本参考书" → 同上，另加 templateParse 识别四段结构 → bookPlan 给编/章骨架
+                    →（模型按编写 book/parts/*.md）→ 两遍排版 → DOCX + PDF
 "分析…不落库"   → vk_prepare → 直接输出到 <outputDir>/reports/
 "配登录态"      → vk_login（自动发现或给步骤）
 "自检环境"      → vk_doctor
 "质检/重写"     → vk_run 的 quality/dedupe 段 + 模型重写 cards/
 ```
+
+### 「参考书」模板说了什么
+
+模板里的四段是硬约束，`template` 命令会把它解析成 `deliverable=book` 与 `sections[]`：
+
+| 段 | 内容 | 谁来写 |
+|---|---|---|
+| 简介 | 这本书是什么、覆盖范围、编写原则、怎么用、体例与局限 | 模型 |
+| 目录 | 编—章—节三级，PDF 版带真实页码 | 排版脚本（两遍排版量页码） |
+| 正文 | 按"编=一集/一章"重排，概念去重、一次讲透，其余回指 | 模型 |
+| 附录 | 概念词典 / 大事年表 / 会议或条约表 / 人物索引 / 题型模板 / 覆盖核验 | 脚本汇总 + 模型补写 |
+
+`bookplan` 只做确定性估算（每集一编、每编 2–4 章、章数按核心要点数推），**正文一个字都不代写**。
 
 ### 为什么建议加「完整版」
 
@@ -162,6 +178,38 @@ dsh plugin --profile web list          # 应能看到 dsh-video-to-knowledge
 1. 先看 `vk_doctor` 的 `字幕轨` 与 `B站登录态` 两行 —— 它会给结论
 2. 若 `B站登录态` 是 `expired`：**先重新导出 cookie**。B 站对未登录用户不下发字幕列表，这一步最容易误判成"没有字幕"
 3. 若登录正常、`字幕轨` 仍 `不可用`：播放器里能看到的中文字幕就是**硬字幕（烧在画面里）**，只能本地 ASR / OCR，或换有 `ai-zh` 字幕轨的视频
+
+**第四种情况：有字幕，但字幕是错的。** 实测遇到过整批串台——接口给 P2/P4 返回的是另一支 iPhone 评测，给 P8 返回的是靶场 vlog，只有 P1 是真的。这类错轨**时长往往也对得上**（那支评测恰好也是 22 分钟），所以旧的"覆盖率 ≥60%"判据会全绿放行。现在由 `audit` 节点做内容级校验（按章关键词命中 + 异物词），见下节。
+
+## 信号节点（字幕三类坑的机器判据）
+
+链里新增五个信号节点，每个都把一次实战教训固化成可复现的判据：
+
+| 节点 | 触发 | 干什么 | 信号 |
+|---|---|---|---|
+| `probeSubs` | `meta.ready` | 多轮采样 `x/player/v2`，只保留 max(end) 落在本 P 时长 85%~115% 的轨道 | `subs.probed` / `subs.thin` |
+| `auditTranscript` | `transcript.ready` | 按章关键词表统计命中，命中≥2 判 ok、1 判 weak、0 或命中异物词判 mismatch | `audit.done` / `audit.failed` |
+| `transcriptGate` | `audit.done` | 覆盖率 + 内容双判据；不再单独看时长 | `transcript.ok` / `transcript.mismatch` |
+| `asrFallback` | `transcript.mismatch` / `transcript.fail` | 本地 ASR 兜底，音频只落临时目录、转完即删 | `asr.done` / `asr.failed` |
+| `prepareBail` | `asr.failed` 等 | ASR 也失败才早停（0 副作用） | `chain.end` |
+| `templateParse` | `intake.ready` | 识别「知识卡 + 参考书（简介/目录/正文/附录）」模板 | `template.parsed` / `template.none` |
+| `bookPlan` | `prepare.ok` | 给出编/章骨架与四段结构（不写正文） | `bookplan.ready` |
+
+对应命令（都在 `pipeline/vk_chain.py`，可单独跑、只输出一个 JSON）：
+
+```bash
+python pipeline/vk_chain.py probe  --video-id BV1xx... --rounds 8     # 0=有轨 / 5=无轨
+python pipeline/vk_chain.py audit  --video-id BV1xx...                # 0=内容对 / 4=串台
+python pipeline/vk_chain.py asr    --video-id BV1xx... --download     # 0=成功 / 6=缺依赖 / 7=失败
+python pipeline/vk_chain.py template --prompt "把这个视频…参考书（简介+目录+正文+附录）：<链接>"
+python pipeline/vk_chain.py bookplan --video-id BV1xx...              # 编/章骨架
+```
+
+三条踩出来的硬规则：
+
+- **只比时长拦不住串台**。错轨可能长度恰好一样，必须做内容校验；异物词（评测/iPhone/靶场）是比关键词更快的信号。
+- **B 站字幕接口不稳定**。同一分 P 多轮结果不同，实测 2–8 轮才能拿全；单次探测的"没有字幕"结论不可信。
+- **ASR 解码别用 PyAV**。faster-whisper 内部 `av.open(metadata_errors=…)` 在部分版本组合下直接 `TypeError`，改用 ffmpeg 解成 numpy 最稳；离线时还要 `HF_ENDPOINT=https://hf-mirror.com` 或 `--model-dir` 指本地模型。
 
 ## 五个工具
 
