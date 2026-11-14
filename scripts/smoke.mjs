@@ -150,11 +150,37 @@ check('gate checks content not just coverage',
   !!gate && JSON.stringify(gate).includes('$.audit.ok'));
 
 const mainIds = chain.nodes.map((n) => n.id);
-for (const id of ['templateParse', 'bookPlan']) {
+for (const id of ['templateParse', 'bookPlan', 'bookGate', 'bookBuild']) {
   check(`signal node ${id}`, mainIds.includes(id));
 }
 const tpl = chain.nodes.find((n) => n.id === 'templateParse');
 check('template node reads prompt', !!tpl && JSON.stringify(tpl).includes('input.prompt'));
+
+/* 4c. 成书子链（拼稿 → 两遍排版 → 量页码 → DOCX/PDF） */
+const bookPath = join(ROOT, 'engine', 'chains', 'video-to-knowledge',
+  'gen.video-to-knowledge.book.json');
+check('file gen.video-to-knowledge.book.json', existsSync(bookPath));
+const book = JSON.parse(readFileSync(bookPath, 'utf8'));
+const bookIds = book.nodes.map((n) => n.id);
+for (const id of ['assembleBook', 'buildPass1', 'pdfPass1', 'measureToc', 'buildFinal', 'pdfFinal']) {
+  check(`book node ${id}`, bookIds.includes(id));
+}
+const bookExec = book.nodes.filter((n) => n.exec);
+check('book exec all use ${python}', bookExec.every((n) => n.exec.runner === '${python}'));
+check('book exec all use ${workDir}', bookExec.every((n) => n.exec.cwd === '${workDir}'));
+check('book chain two-pass toc',
+  JSON.stringify(book.nodes).includes('book/toc.json') &&
+  JSON.stringify(book.nodes.find((n) => n.id === 'buildFinal')).includes('--toc'));
+for (const f of ['pipeline/build_book.py', 'pipeline/measure_toc.py',
+  'pipeline/assemble_book.py', 'pipeline/book_pdf.py']) {
+  check(`file ${f}`, existsSync(join(ROOT, f)));
+}
+const assSrc = readFileSync(join(ROOT, 'pipeline', 'assemble_book.py'), 'utf8');
+check('assemble_book reads utf-8-sig', assSrc.includes('utf-8-sig'));
+const buildSrc = readFileSync(join(ROOT, 'pipeline', 'build_book.py'), 'utf8');
+check('build_book degrades without python-docx', buildSrc.includes('BOOK_DEPS_MISSING'));
+const pdfSrc = readFileSync(join(ROOT, 'pipeline', 'book_pdf.py'), 'utf8');
+check('book_pdf skips when no converter', pdfSrc.includes('PDF_SKIPPED'));
 
 // 三个新命令必须真的注册进 CLI（不然节点 exec 会 127）
 const sigSrc = readFileSync(join(ROOT, 'pipeline', 'vk_signals.py'), 'utf8');

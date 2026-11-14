@@ -1,0 +1,347 @@
+{
+  "id": "gen.video-to-knowledge.book",
+  "title": "参考书成书子链：拼稿 → 两遍排版 → 量目录页码 → DOCX/PDF",
+  "version": "0.1.0",
+  "tier": "infra",
+  "intent": "接收 {bookDir}，把「简介 + 各编 + 各附录」的 Markdown 拼成一册，先排一遍带占位目录的 DOCX 并转 PDF，用 PDF 真实分页量出每个标题的页码，再排第二遍把页码填进目录，最后产出交付用的 DOCX 与 PDF。由主链在 template.deliverable == book 时调用。",
+  "principle": [
+    "正文只来自模型写好的 book/parts/*.md；排版脚本不得改写正文内容，只做版式。",
+    "目录页码必须量出来的：第一遍占位（行数与真实条目一致）→ 转 PDF → 量页码 → 第二遍填入，保证两遍分页一致。",
+    "PDF 是可选产物：找不到转换器时 DOCX 照常交付，PDF 记 skipped，不阻断成书。",
+    "缺 python-docx 时明确报 BOOK_DEPS_MISSING 并给安装提示，不吐栈回溯。",
+    "所有 exec 只经 ${python} 与 ${workDir} 占位符，路径不写死。"
+  ],
+  "acceptance": [
+    "产出 $.book = {docx, pdf, pages, headings, tocMatched, cjk}",
+    "目录条目数 = 实际标题数，且第二遍 PDF 复测页码与第一遍一致",
+    "PDF 缺失时 pdf 字段为 null 且 verdict=done_no_pdf，DOCX 仍在"
+  ],
+  "boundaries": [
+    "不生成正文内容（正文由模型写 book/parts/*.md）",
+    "不修改 KB 里的卡片，只读 cards/ 做统计",
+    "不把 PDF 转换器路径写进仓库，只认环境变量/PATH"
+  ],
+  "interfaces": {
+    "assembleBook": "in: $.input.bookDir；out: $.bookSrc；emit bookSrc.ready",
+    "buildPass1": "in: $.bookSrc.out；out: $.bookPass1；emit bookPass1.ready",
+    "pdfPass1": "in: $.bookPass1.docx；out: $.pdfPass1；emit pdfPass1.done",
+    "measureToc": "in: $.pdfPass1.pdf + headings.json；out: $.toc；emit toc.ready",
+    "buildFinal": "in: $.bookSrc + $.toc；out: $.book；emit book.ready",
+    "pdfFinal": "in: $.book.docx；out: $.book.pdf；emit book.pdf.done",
+    "bookDone": "in: $.book；out: $.output；halt"
+  },
+  "regressionTests": [
+    {
+      "id": "RT-VK-BOOK-1",
+      "type": "happy",
+      "input": "{bookDir: \"book\"}，且 front.md + parts/part01..N.md + appA..G.md 齐全",
+      "expect": "产出 DOCX（含目录页码）与 PDF，tocMatched == headings",
+      "rationale": "标准成书主路径"
+    },
+    {
+      "id": "RT-VK-BOOK-2",
+      "type": "edge",
+      "input": "没有 PDF 转换器（无 VK_PDF_NODE / soffice）",
+      "expect": "pdfPass1/pdfFinal 记 skipped，最终仍产出 DOCX，verdict=done_no_pdf",
+      "rationale": "PDF 是可选产物，缺它不能阻断交付"
+    },
+    {
+      "id": "RT-VK-BOOK-3",
+      "type": "negative",
+      "input": "运行环境没有 python-docx",
+      "expect": "build 退出码 9 + BOOK_DEPS_MISSING + 安装提示，不吐栈",
+      "rationale": "依赖缺失要给可执行建议"
+    }
+  ],
+  "budget": {
+    "maxNodes": 8,
+    "maxLLMTokens": 0
+  },
+  "nodes": [
+    {
+      "id": "assembleBook",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "拼稿：front.md + parts/partNN.md + parts/appX.md → book_all.md",
+      "trigger": [
+        {
+          "on": "chain.start"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/assemble_book.py --book-dir book --out book/book_all.md`：按编号拼各编、按 A→G 拼附录，输出 $.bookSrc={bookDir,out,files[],missingApps[],chars,cjk,verdict}。",
+        "visible": "📚 [assembleBook] 拼接简介 / 各编 / 各附录…",
+        "resultPath": "$.bookSrc"
+      },
+      "out": "$.bookSrc",
+      "maxRuns": 1,
+      "emit": [
+        "bookSrc.ready"
+      ],
+      "declares": [
+        "bookSrc.ready",
+        "bookSrc.failed"
+      ],
+      "writes": [
+        "$.bookSrc"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/assemble_book.py",
+        "cwd": "${workDir}",
+        "args": [
+          "--book-dir",
+          "book",
+          "--out",
+          "book/book_all.md"
+        ]
+      },
+      "onError": {
+        "emit": [
+          "bookSrc.failed"
+        ]
+      }
+    },
+    {
+      "id": "buildPass1",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "第一遍排版：目录用占位行（行数=真实条目数，保证分页稳定）",
+      "trigger": [
+        {
+          "on": "signal.bookSrc.ready"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/build_book.py --md book/book_all.md --out book/pass1.docx`：按内置版式（A4、宋体/黑体、三级标题、表格、引文块）生成 DOCX，同时把标题清单写到 pass1.docx.headings.json；目录先留占位。缺 python-docx → 退出码 9（BOOK_DEPS_MISSING）。",
+        "visible": "📐 [buildPass1] 第一遍排版（占位目录）…",
+        "resultPath": "$.bookPass1"
+      },
+      "out": "$.bookPass1",
+      "maxRuns": 1,
+      "emit": [
+        "bookPass1.ready"
+      ],
+      "declares": [
+        "bookPass1.ready"
+      ],
+      "writes": [
+        "$.bookPass1"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/build_book.py",
+        "cwd": "${workDir}",
+        "args": [
+          "--md",
+          "book/book_all.md",
+          "--out",
+          "book/pass1.docx"
+        ]
+      }
+    },
+    {
+      "id": "pdfPass1",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "第一遍转 PDF（用于量真实页码；无转换器则跳过）",
+      "trigger": [
+        {
+          "on": "signal.bookPass1.ready"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/book_pdf.py --in book/pass1.docx --out book/pass1.pdf`：优先用 VK_PDF_NODE + VK_PDF_CLI（LibreOffice Kit），其次 soffice；都没有则输出 {skipped:true} 并退出 0。",
+        "visible": "🖨️ [pdfPass1] DOCX → PDF（量页码用）…",
+        "resultPath": "$.pdfPass1"
+      },
+      "out": "$.pdfPass1",
+      "maxRuns": 1,
+      "emit": [
+        "pdfPass1.done"
+      ],
+      "declares": [
+        "pdfPass1.done",
+        "pdfPass1.skipped"
+      ],
+      "writes": [
+        "$.pdfPass1"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/book_pdf.py",
+        "cwd": "${workDir}",
+        "args": [
+          "--in",
+          "book/pass1.docx",
+          "--out",
+          "book/pass1.pdf"
+        ]
+      }
+    },
+    {
+      "id": "measureToc",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "量页码：按字号找出每个一/二级标题落在 PDF 第几页",
+      "trigger": [
+        {
+          "on": "signal.pdfPass1.done"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/measure_toc.py --pdf book/pass1.pdf --headings book/pass1.docx.headings.json --out book/toc.json`：只认大字号行（一级 ≥16pt、二级 ≥13pt），避开目录页自身的同名文字；输出 {页码索引 → 页号}，定位失败退出码 3。",
+        "visible": "🔢 [measureToc] 从 PDF 量出每个标题的页码…",
+        "resultPath": "$.toc"
+      },
+      "out": "$.toc",
+      "maxRuns": 1,
+      "emit": [
+        "toc.ready"
+      ],
+      "declares": [
+        "toc.ready",
+        "toc.failed"
+      ],
+      "writes": [
+        "$.toc"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/measure_toc.py",
+        "cwd": "${workDir}",
+        "args": [
+          "--pdf",
+          "book/pass1.pdf",
+          "--headings",
+          "book/pass1.docx.headings.json",
+          "--out",
+          "book/toc.json"
+        ]
+      },
+      "onError": {
+        "emit": [
+          "toc.failed"
+        ]
+      }
+    },
+    {
+      "id": "buildFinal",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "第二遍排版：把真实页码填进目录",
+      "trigger": [
+        {
+          "on": "signal.toc.ready"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/build_book.py --md book/book_all.md --out reports/参考书.docx --toc book/toc.json`：第二遍与第一遍版式完全一致（占位行数=真实条目数），因此分页不变、页码可直接沿用。",
+        "visible": "📘 [buildFinal] 第二遍排版（填目录页码）…",
+        "resultPath": "$.book"
+      },
+      "out": "$.book",
+      "maxRuns": 1,
+      "emit": [
+        "book.ready"
+      ],
+      "declares": [
+        "book.ready"
+      ],
+      "writes": [
+        "$.book"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/build_book.py",
+        "cwd": "${workDir}",
+        "args": [
+          "--md",
+          "book/book_all.md",
+          "--out",
+          "reports/中国近现代史纲要_参考书.docx",
+          "--toc",
+          "book/toc.json"
+        ]
+      }
+    },
+    {
+      "id": "pdfFinal",
+      "kind": "fn",
+      "use": "agentStep",
+      "title": "最终转 PDF（可选）",
+      "trigger": [
+        {
+          "on": "signal.book.ready"
+        }
+      ],
+      "in": {
+        "action": "运行 `python pipeline/book_pdf.py --in reports/中国近现代史纲要_参考书.docx --out reports/中国近现代史纲要_参考书.pdf`；无转换器则 skipped。",
+        "visible": "🖨️ [pdfFinal] 最终 DOCX → PDF…",
+        "resultPath": "$.bookPdf"
+      },
+      "out": "$.bookPdf",
+      "maxRuns": 1,
+      "emit": [
+        "book.pdf.done"
+      ],
+      "declares": [
+        "book.pdf.done"
+      ],
+      "writes": [
+        "$.bookPdf"
+      ],
+      "exec": {
+        "runner": "${python}",
+        "script": "${pluginRoot}/pipeline/book_pdf.py",
+        "cwd": "${workDir}",
+        "args": [
+          "--in",
+          "reports/中国近现代史纲要_参考书.docx",
+          "--out",
+          "reports/中国近现代史纲要_参考书.pdf"
+        ]
+      }
+    },
+    {
+      "id": "bookDone",
+      "kind": "fn",
+      "use": "deliver",
+      "title": "成书收口",
+      "trigger": [
+        {
+          "on": "signal.book.pdf.done"
+        },
+        {
+          "on": "signal.bookSrc.failed"
+        }
+      ],
+      "in": {
+        "answer": "=$.book",
+        "quality": {
+          "ok": true
+        },
+        "completionPackage": {
+          "scope": "参考书成书：拼稿 → 两遍排版 → 量页码 → DOCX/PDF",
+          "evidence": {
+            "note": "证据层（机器出）",
+            "bookSrc": "=$.bookSrc",
+            "book": "=$.book",
+            "toc": "=$.toc",
+            "pdf": "=$.bookPdf"
+          }
+        }
+      },
+      "out": "$.output",
+      "halt": true,
+      "declares": [
+        "bookDone.done",
+        "chain.end"
+      ],
+      "emit": [
+        "chain.end"
+      ]
+    }
+  ],
+  "creed": "road"
+}

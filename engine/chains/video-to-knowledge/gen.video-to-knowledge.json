@@ -32,7 +32,8 @@
     "任一 gate 失败场景 0 次落盘（gate 前置）",
     "交付含 narrative + evidence 两层，evidence 可复算",
     "SESSDATA 不进黑板/LLM/日志/git，仅注入 yt-dlp 子进程 env（D3/FR-14）",
-    "识别「知识卡 + 参考书（简介/目录/正文/附录）」模板，并给出编/章骨架"
+    "识别「知识卡 + 参考书（简介/目录/正文/附录）」模板，并给出编/章骨架",
+    "提示词含「参考书」时按四段结构成书（拼稿→两遍排版→量页码→DOCX/PDF）"
   ],
   "boundaries": {
     "owns": "单视频链接 → 带时间戳 Markdown 卡片 → kb/<collection>/ 落盘的离线编译链（检索/向量化/重排交 WorkBuddy 工作台，D9）。",
@@ -65,7 +66,9 @@
     "outlineGate": "in: $.intake.outlinePath；emit outline.need/outline.skip",
     "outlineMerge": "in: $.card + $.intake.outlinePath；out: $.outline；emit outline.done",
     "templateParse": "in: $.input.prompt；out: $.template；emit template.parsed/template.none",
-    "bookPlan": "in: $.card + meta；out: $.bookPlan；emit bookplan.ready"
+    "bookPlan": "in: $.card + meta；out: $.bookPlan；emit bookplan.ready",
+    "bookGate": "in: $.bookPlan + $.template；emit book.build/book.skip",
+    "bookBuild": "in: $.template + book/ 源稿；out: $.book（docx/pdf/页码）"
   },
   "regressionTests": [
     {
@@ -479,6 +482,51 @@
           "bookplan.failed"
         ]
       }
+    },
+    {
+      "id": "bookGate",
+      "kind": "gate",
+      "title": "是否出一本参考书（template.deliverable == book）",
+      "trigger": [
+        {
+          "on": "signal.bookplan.ready"
+        }
+      ],
+      "cases": [
+        {
+          "when": "$.template && $.template.deliverable == \"book\"",
+          "emit": "book.build",
+          "label": "要成书",
+          "reason": "提示词里出现「参考书 + 简介/目录/正文/附录」"
+        }
+      ],
+      "out": "$.bookGate",
+      "default": "book.skip",
+      "declares": [
+        "book.build",
+        "book.skip"
+      ]
+    },
+    {
+      "id": "bookBuild",
+      "kind": "chain",
+      "use": "gen.video-to-knowledge.book",
+      "title": "成书子链：拼稿 → 两遍排版 → 量页码 → DOCX/PDF",
+      "trigger": [
+        {
+          "on": "signal.book.build"
+        }
+      ],
+      "in": {
+        "bookDir": "book"
+      },
+      "pick": "book",
+      "out": "$.book",
+      "maxRuns": 1,
+      "declares": [
+        "book.ok",
+        "book.failed"
+      ]
     },
     {
       "id": "qualityCheck",

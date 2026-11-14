@@ -211,6 +211,36 @@ python pipeline/vk_chain.py bookplan --video-id BV1xx...              # 编/章�
 - **B 站字幕接口不稳定**。同一分 P 多轮结果不同，实测 2–8 轮才能拿全；单次探测的"没有字幕"结论不可信。
 - **ASR 解码别用 PyAV**。faster-whisper 内部 `av.open(metadata_errors=…)` 在部分版本组合下直接 `TypeError`，改用 ffmpeg 解成 numpy 最稳；离线时还要 `HF_ENDPOINT=https://hf-mirror.com` 或 `--model-dir` 指本地模型。
 
+## 成书子链（可选：把卡片汇编成一本书）
+
+提示词里出现「参考书（简介+目录+正文+附录）」时，主链会在 ookPlan 之后走 ookBuild，调用子链 gen.video-to-knowledge.book：
+
+`	ext
+assembleBook  book/front.md + parts/partNN.md + parts/appX.md → book/book_all.md
+buildPass1    第一遍排版（目录占位，行数=真实条目数）→ book/pass1.docx + headings.json
+pdfPass1      pass1.docx → pass1.pdf（无转换器则 skipped）
+measureToc    从 PDF 按字号定位每个标题 → book/toc.json
+buildFinal    第二遍排版，把页码填进目录 → reports/…docx
+pdfFinal      reports/…docx → reports/…pdf（可选）
+`
+
+两遍排版是关键：占位行数与真实条目一致，所以第二遍分页不变、页码可以直接沿用。实测 46 个标题、120 页，复测页码差异 0。
+
+依赖与降级：
+
+| 依赖 | 缺失时 |
+|---|---|
+| python-docx | 报 BOOK_DEPS_MISSING + 安装提示（退出码 9），不吐栈 |
+| PDF 转换器（LibreOffice Kit / soffice） | PDF 记 skipped，DOCX 照常交付 |
+
+PDF 转换器用环境变量指定，不写进仓库：
+
+`ash
+export VK_PDF_NODE=<node 可执行文件>
+export VK_PDF_CLI=<libreoffice-kit cli.js>
+# 或 VK_SOFFICE=<soffice.exe>
+`
+
 ## 五个工具
 
 | 工具 | 作用 | 会联网 |
