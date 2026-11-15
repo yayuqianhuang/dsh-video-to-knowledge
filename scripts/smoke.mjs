@@ -189,6 +189,16 @@ for (const cmd of ['audit', 'probe', 'asr', 'template', 'bookplan']) {
 }
 check('chain imports vk_signals', chainSrc.includes('vk_signals'));
 
+/* 4d. 缺依赖：探测做厚 + 引导给准（不自动安装） */
+check('vk_pipeline has ytdlp_cmd', pipeSrc.includes('def ytdlp_cmd'));
+check('module fallback uses yt_dlp', pipeSrc.includes('"-m", "yt_dlp"'));
+check('vk_chain uses ytdlp_cmd', chainSrc.includes('vp.ytdlp_cmd('));
+check('vk_chain has install plan', chainSrc.includes('_install_plan'));
+check('doctor emits installPlan', chainSrc.includes('"installPlan"'));
+const idxSrc2 = readFileSync(join(ROOT, 'index.js'), 'utf8');
+check('vk_doctor renders installPlan', idxSrc2.includes('d.installPlan'));
+check('no silent auto-install', !/pip install[^`\n]*\+\+|subprocess[^\n]*pip install/.test(chainSrc));
+
 /* 5. 列链 */
 const lc = await tools.get('ajtc_list_chains').execute({});
 const lcText = lc.content[0].text;

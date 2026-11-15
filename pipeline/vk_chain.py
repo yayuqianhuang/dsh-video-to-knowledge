@@ -25,6 +25,7 @@
 """
 
 import argparse
+import platform as _pf
 import json
 import os
 import re
@@ -110,9 +111,9 @@ def _cookie_copy(path):
 def _build_meta_from_ytdlp(url, vid, a, require_login=False):
     """取元数据。B 站元数据游客可见，因此默认**不要求**登录；
     只有 require_login=True（如确需连字幕一起抓的路径）才强制 cookie。"""
-    ytdlp = vp.resolve_ytdlp(getattr(a, "ytdlp", None))
+    ytdlp = vp.ytdlp_cmd(getattr(a, "ytdlp", None))
     if not ytdlp:
-        die("找不到 yt-dlp（--ytdlp / $VK_YTDLP）")
+        die("找不到 yt-dlp：可用 winget install yt-dlp.yt-dlp / pip install -U yt-dlp / pipx install yt-dlp 安装，或用 --ytdlp / $VK_YTDLP 指定可执行文件")
     platform = vp.platform_of(url)
     cookies = a.cookies or os.environ.get("BILI_COOKIES") or os.environ.get("VK_COOKIES")
     if cookies and not os.path.isfile(cookies):
@@ -120,7 +121,7 @@ def _build_meta_from_ytdlp(url, vid, a, require_login=False):
     if platform == "bilibili" and require_login and not cookies:
         die("B 站抓字幕需要登录态：--cookies <cookie文件> 或 $BILI_COOKIES")
 
-    cmd = [ytdlp, "--no-warnings"]
+    cmd = ytdlp + ["--no-warnings"]
     if cookies:
         cmd += ["--cookies", _cookie_copy(cookies)]
     cmd += ["--print", "%(playlist_index)s\t%(duration)s\t%(playlist_title)s\t%(title)s", url]
@@ -205,9 +206,9 @@ def cmd_transcript(a):
 
 def _fetch_and_convert(url, vid, meta, a):
     """抓字幕（yt-dlp --cookies）+ 多 P 偏移合并成 transcript.jsonl。"""
-    ytdlp = vp.resolve_ytdlp(getattr(a, "ytdlp", None))
+    ytdlp = vp.ytdlp_cmd(getattr(a, "ytdlp", None))
     if not ytdlp:
-        die("找不到 yt-dlp")
+        die("找不到 yt-dlp：可用 winget install yt-dlp.yt-dlp / pip install -U yt-dlp / pipx install yt-dlp 安装，或用 --ytdlp / $VK_YTDLP 指定可执行文件")
     platform = vp.platform_of(url)
     cookies = a.cookies or os.environ.get("BILI_COOKIES") or os.environ.get("VK_COOKIES")
     if platform == "bilibili":
@@ -360,15 +361,58 @@ def _verify_bili_login(path, timeout=8):
         return {"checked": False, "isLogin": False, "reason": type(e).__name__}
 
 
+def _install_plan(missing):
+    """按平台给出可复制的安装命令（不执行，只回显；执行权在用户）。"""
+    sysname = _pf.system().lower()
+    if sysname == "windows":
+        osname = "windows"
+    elif sysname == "darwin":
+        osname = "macos"
+    else:
+        osname = "linux"
+
+    CMD = {
+        "yt-dlp": {
+            "windows": ["winget install --id yt-dlp.yt-dlp -e",
+                        "pip install -U yt-dlp", "pipx install yt-dlp"],
+            "macos": ["brew install yt-dlp", "pipx install yt-dlp"],
+            "linux": ["pipx install yt-dlp", "pip install --user -U yt-dlp"],
+        },
+        "ffmpeg": {
+            "windows": ["winget install --id Gyan.FFmpeg -e"],
+            "macos": ["brew install ffmpeg"],
+            "linux": ["sudo apt install -y ffmpeg"],
+        },
+        "faster-whisper": {
+            "windows": ["pip install -U faster-whisper"],
+            "macos": ["pip install -U faster-whisper"],
+            "linux": ["pip install -U faster-whisper"],
+        },
+    }
+    NOTE = {
+        "yt-dlp": "装完不用重装插件；若仍不在 PATH，用 VK_YTDLP 指路径，或直接用 python -m yt_dlp（插件自动识别模块）",
+        "ffmpeg": "只有走本地 ASR 才需要；也可用 VK_FFMPEG 指定路径",
+        "faster-whisper": "首次用模型会联网下载；国内建议 HF_ENDPOINT=https://hf-mirror.com，或用 --model-dir 指本地模型",
+    }
+    plan = []
+    for tool in missing:
+        if tool in CMD:
+            plan.append({"tool": tool, "os": osname,
+                         "commands": CMD[tool][osname], "note": NOTE[tool]})
+    return plan
+
+
 def cmd_doctor(a):
     url = a.url or ""
     platform = vp.platform_of(url) if url else a.platform
     vid = a.video_id or (vp.detect_video_id(url)[0] if url else None)
 
-    ytdlp = vp.resolve_ytdlp(getattr(a, "ytdlp", None))
+    ytdlp_exe = vp.resolve_ytdlp(getattr(a, "ytdlp", None))
+    ytdlp_cmdline = vp.ytdlp_cmd(getattr(a, "ytdlp", None))
+    ytdlp = ytdlp_exe or (ytdlp_cmdline[-1] if ytdlp_cmdline else None)
     ffmpeg = _find_ffmpeg()
     missing = []
-    if not ytdlp:
+    if not ytdlp_cmdline:
         missing.append("yt-dlp")
     if not ffmpeg:
         missing.append("ffmpeg")
@@ -401,9 +445,16 @@ def cmd_doctor(a):
     if platform == "bilibili" and bili_login in ("invalid", "expired"):
         missing.append("biliLogin")
 
+    install_missing = [m for m in missing if m in ("yt-dlp", "ffmpeg")]
+    if not _has_whisper():
+        install_missing.append("faster-whisper")
+
     return emit({
-        "ytdlp": bool(ytdlp),
+        "installPlan": _install_plan(install_missing),
+        "ytdlp": bool(ytdlp_cmdline),
         "ytdlpPath": ytdlp,
+        "ytdlpMode": ("module" if (ytdlp_cmdline and not ytdlp_exe)
+                      else ("binary" if ytdlp_exe else "missing")),
         "ffmpeg": bool(ffmpeg),
         "ffmpegPath": ffmpeg,
         "whisper": _has_whisper(),
@@ -777,12 +828,12 @@ def cmd_subs(a):
     而不是等用户跑完 vk_prepare（下载+清洗）才失败。
     """
     url = a.url
-    ytdlp = vp.resolve_ytdlp(getattr(a, "ytdlp", None))
+    ytdlp = vp.ytdlp_cmd(getattr(a, "ytdlp", None))
     if not ytdlp:
-        die("找不到 yt-dlp")
+        die("找不到 yt-dlp：可用 winget install yt-dlp.yt-dlp / pip install -U yt-dlp / pipx install yt-dlp 安装，或用 --ytdlp / $VK_YTDLP 指定可执行文件")
     cookies = a.cookies or os.environ.get("BILI_COOKIES") or os.environ.get("VK_COOKIES")
 
-    cmd = [ytdlp, "--no-warnings", "--list-subs", "--skip-download"]
+    cmd = ytdlp + ["--no-warnings", "--list-subs", "--skip-download"]
     items = getattr(a, "playlist_items", None)
     if items:
         cmd += ["--playlist-items", items]

@@ -474,7 +474,7 @@ export function apply(ctx) {
 
       const lines = [
         `Python      ${py}`,
-        `yt-dlp      ${d.ytdlp ? d.ytdlpPath : '缺失'}`,
+        `yt-dlp      ${d.ytdlp ? d.ytdlpPath + (d.ytdlpMode === 'module' ? '（模块模式：python -m yt_dlp）' : '') : '缺失'}`,
         `ffmpeg      ${d.ffmpeg ? d.ffmpegPath : '缺失（仅本地 ASR 需要）'}`,
         `whisper     ${d.whisper ? '可用' : '不可用（仅本地 ASR 需要）'}`,
         `B站登录态   ${(() => {
@@ -492,7 +492,15 @@ export function apply(ctx) {
       ]
       if (d.missing.length) {
         lines.push('', '修复建议：')
-        if (d.missing.includes('yt-dlp')) lines.push('· 安装 yt-dlp：pip install -U yt-dlp')
+        if (Array.isArray(d.installPlan) && d.installPlan.length) {
+          for (const p of d.installPlan) {
+            lines.push(`· 安装 ${p.tool}（${p.os}），任选一条：`)
+            for (const c of p.commands) lines.push(`    ${c}`)
+            if (p.note) lines.push(`    ${p.note}`)
+          }
+        } else if (d.missing.includes('yt-dlp')) {
+          lines.push('· 安装 yt-dlp：pip install -U yt-dlp')
+        }
         if (d.missing.includes('biliLogin')) lines.push('· B 站 cookie 缺失或已过期：重新导出 Netscape 格式文件，然后调 vk_login 登记（浏览器能看到 AI 字幕但插件只看到弹幕，多半就是过期）')
       }
       if (subsText !== null) lines.splice(5, 0, `字幕轨      ${subsText}`)

@@ -29,9 +29,31 @@ dsh plugin --profile web list          # 应能看到 dsh-video-to-knowledge
 | 依赖 | 用途 | 检查方式 |
 |---|---|---|
 | **Python 3.10+** | 跑流水线脚本 | 插件会依次尝试 `py -3`、`python3`、`python`；也可设 `VK_PYTHON` 指定 |
-| **yt-dlp** | 抓元数据与字幕 | `pip install -U yt-dlp` |
+| **yt-dlp** | 抓元数据与字幕 | 见下「缺依赖怎么办」 |
 | ffmpeg + faster-whisper | **仅**"无字幕视频走本地 ASR"时需要 | 不装也能用平台字幕 |
 | **B 站登录 cookie** | 抓 `need_login_subtitle` 视频的字幕 | 见下 |
+
+#### 缺依赖怎么办：探测 → 引导（不会替你装）
+
+插件**不会**自动安装任何东西——安装期跑脚本会被 pnpm 拦（git 包默认禁止 `prepare`），运行期静默装二进制又要写用户目录、跨平台命令还各不相同。所以只做两件事：
+
+**① 探测做厚。** `yt-dlp` 按这个顺序找，任何一档命中就能用：
+
+```text
+--ytdlp / $VK_YTDLP  →  PATH 上的 yt-dlp  →  常见安装路径  →  python -m yt_dlp
+```
+
+最后一档是为了救这个常见情况：**`pip install yt-dlp` 装过了，但 Scripts 目录不在 PATH**。只要模块装好，`python -m yt_dlp` 一定能跑，插件会自动切到「模块模式」（`vk_doctor` 里显示 `ytdlpMode: module`）。
+
+**② 引导给准。** `vk_doctor` 会输出一个 `installPlan`，按你的系统给可复制的命令：
+
+| 系统 | yt-dlp | ffmpeg |
+|---|---|---|
+| Windows | `winget install --id yt-dlp.yt-dlp -e` / `pip install -U yt-dlp` / `pipx install yt-dlp` | `winget install --id Gyan.FFmpeg -e` |
+| macOS | `brew install yt-dlp` / `pipx install yt-dlp` | `brew install ffmpeg` |
+| Linux | `pipx install yt-dlp` / `pip install --user -U yt-dlp` | `sudo apt install -y ffmpeg` |
+
+装完**不用重装插件**；如果仍不在 PATH，用 `VK_YTDLP` 指路径，或直接用模块模式。
 
 ## 第一次用：三步
 

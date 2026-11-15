@@ -60,7 +60,11 @@ def _first_existing(paths):
 
 
 def resolve_ytdlp(explicit=None):
-    """按 --ytdlp > $VK_YTDLP > PATH > 常见安装位置 的顺序找 yt-dlp。"""
+    """按 --ytdlp > $VK_YTDLP > PATH > 常见安装位置 的顺序找 yt-dlp。
+
+    只找**可执行文件**。若用户 `pip install yt-dlp` 装过、但 Scripts 目录不在 PATH
+    （Windows 上极常见），这里仍会返回 None —— 那种情况由 ytdlp_cmd() 兜底。
+    """
     cands = [explicit, os.environ.get("VK_YTDLP"), shutil.which("yt-dlp")]
     home = os.path.expanduser("~")
     # POSIX 常见位置
@@ -77,6 +81,30 @@ def resolve_ytdlp(explicit=None):
             cands.append(os.path.join(base, "Python", pyver, "Scripts", "yt-dlp.exe"))
             cands.append(os.path.join(base, "Programs", "Python", pyver, "Scripts", "yt-dlp.exe"))
     return _first_existing(cands)
+
+
+def _module_available(mod):
+    """`python -m <mod> --version` 能跑通即认为模块可用（不依赖 PATH）。"""
+    try:
+        p = subprocess.run([sys.executable, "-m", mod, "--version"],
+                           capture_output=True, timeout=30)
+        return p.returncode == 0
+    except Exception:
+        return False
+
+
+def ytdlp_cmd(explicit=None):
+    """返回可直接拼进 argv 的命令前缀（list）：[exe] 或 [python, "-m", "yt_dlp"]。
+
+    比 resolve_ytdlp() 多一档「模块兜底」：pip 装了但没进 PATH 时仍能用。
+    找不到 → None。
+    """
+    exe = resolve_ytdlp(explicit)
+    if exe:
+        return [exe]
+    if _module_available("yt_dlp"):
+        return [sys.executable, "-m", "yt_dlp"]
+    return None
 
 
 def resolve_cleaner(explicit=None):
@@ -246,9 +274,10 @@ def cmd_fetch(args):
         vid = args.video_id
     require(bool(vid), "无法从 URL 解析视频号，请用 --video-id 显式指定")
 
-    ytdlp = resolve_ytdlp(args.ytdlp)
-    require(bool(ytdlp),
-            "找不到 yt-dlp。请安装（pip install yt-dlp）或用 --ytdlp / $VK_YTDLP 指定。")
+    ytdlp_cmdline = ytdlp_cmd(args.ytdlp)
+    require(bool(ytdlp_cmdline),
+            "找不到 yt-dlp。请安装（winget install yt-dlp.yt-dlp / pip install -U yt-dlp / "
+            "pipx install yt-dlp 任一），或用 --ytdlp / $VK_YTDLP 指定可执行文件。")
 
     cookies = args.cookies or os.environ.get("BILI_COOKIES") or os.environ.get("VK_COOKIES")
     if platform == "bilibili":
@@ -260,7 +289,7 @@ def cmd_fetch(args):
     subsdir = os.path.join(viddir, "subs")
     os.makedirs(subsdir, exist_ok=True)
 
-    common = [ytdlp, "--no-warnings"]
+    common = ytdlp_cmdline + ["--no-warnings"]
     if cookies:
         common += ["--cookies", cookies]
 
