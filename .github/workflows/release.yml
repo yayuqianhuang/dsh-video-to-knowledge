@@ -39,11 +39,11 @@ jobs:
           notes="${{ steps.notes.outputs.file }}"
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "release $tag 已存在 → 只更新正文"
+            echo "release $tag 已存在 → 更新正文并确保已发布（非 draft）"
             if [ -n "$notes" ]; then
-              gh release edit "$tag" --notes-file "$notes"
+              gh release edit "$tag" --notes-file "$notes" --draft=false
             else
-              gh release edit "$tag" --notes ""
+              gh release edit "$tag" --notes "" --draft=false
             fi
             exit 0
           fi
