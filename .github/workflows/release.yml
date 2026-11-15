@@ -1,0 +1,65 @@
+name: release
+
+# 推 tag 即发版：正文取自 docs/releases/<tag>.md，缺失则用 GitHub 自动生成的 release notes。
+# 用仓库内置的 GITHUB_TOKEN（运行时临时签发），仓库里不存任何长期密钥。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve notes
+        id: notes
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -f "docs/releases/${tag}.md" ]; then
+            echo "file=docs/releases/${tag}.md" >> "$GITHUB_OUTPUT"
+          else
+            echo "file=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.notes.outputs.tag }}"
+          notes="${{ steps.notes.outputs.file }}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag 已存在 → 只更新正文"
+            if [ -n "$notes" ]; then
+              gh release edit "$tag" --notes-file "$notes"
+            else
+              gh release edit "$tag" --notes ""
+            fi
+            exit 0
+          fi
+
+          if [ -n "$notes" ]; then
+            gh release create "$tag" --title "$tag" --notes-file "$notes"
+          else
+            gh release create "$tag" --title "$tag" --generate-notes
+          fi
+
+      - name: Summary
+        run: |
+          echo "### Release ${{ steps.notes.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.notes.outputs.file }}" ]; then
+            echo "正文来源：\`${{ steps.notes.outputs.file }}\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "正文来源：GitHub 自动生成（仓库里没有对应 notes 文件）" >> "$GITHUB_STEP_SUMMARY"
+          fi

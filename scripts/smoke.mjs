@@ -189,6 +189,15 @@ for (const cmd of ['audit', 'probe', 'asr', 'template', 'bookplan']) {
 }
 check('chain imports vk_signals', chainSrc.includes('vk_signals'));
 
+/* 4e. 发版工作流：推 tag 即发版，用内置 token（不落长期密钥） */
+const relPath = join(ROOT, '.github', 'workflows', 'release.yml');
+check('file .github/workflows/release.yml', existsSync(relPath));
+const relSrc = existsSync(relPath) ? readFileSync(relPath, 'utf8') : '';
+check('release workflow triggers on v* tags', /tags:\s*\n\s*-\s*'v\*'/.test(relSrc));
+check('release workflow uses builtin token', relSrc.includes('github.token'));
+check('release workflow is idempotent', relSrc.includes('gh release view') && relSrc.includes('gh release edit'));
+check('release workflow declares contents:write', /permissions:\s*\n\s*contents:\s*write/.test(relSrc));
+
 /* 4d. 缺依赖：探测做厚 + 引导给准（不自动安装） */
 check('vk_pipeline has ytdlp_cmd', pipeSrc.includes('def ytdlp_cmd'));
 check('module fallback uses yt_dlp', pipeSrc.includes('"-m", "yt_dlp"'));
