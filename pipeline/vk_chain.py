@@ -221,7 +221,7 @@ def _fetch_and_convert(url, vid, meta, a):
     subsdir = os.path.join(viddir, "subs")
     os.makedirs(subsdir, exist_ok=True)
 
-    cmd = [ytdlp, "--no-warnings"]
+    cmd = ytdlp + ["--no-warnings"]
     if cookies:
         cmd += ["--cookies", _cookie_copy(cookies)]
     cmd += ["--write-subs", "--write-auto-subs",

@@ -241,6 +241,8 @@ def parse_md(path):
 
 # ----------------------------------------------------------------- 渲染
 class Book:
+    header_text = ""
+
     def __init__(self):
         self.doc = Document()
         self.headings = []          # [(level, text)]
@@ -272,7 +274,7 @@ class Book:
         hp = sec.header.paragraphs[0]
         hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
         add_bottom_border(hp, sz=4, color="BBBBBB")
-        r = hp.add_run("中国近现代史纲要 · 全书考点参考书")
+        r = hp.add_run(self.header_text or "")
         set_font(r, SONG, 9, color=GREY)
 
         fp = sec.footer.paragraphs[0]
@@ -515,10 +517,10 @@ class Book:
         return self
 
 
-def collect_headings(blocks):
+def collect_headings(blocks, levels=2):
     out = []
     for b in blocks:
-        if b[0] == "h" and b[1] <= 2:
+        if b[0] == "h" and b[1] <= levels:
             out.append((b[1], b[2]))
     return out
 
@@ -530,6 +532,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--toc")
     ap.add_argument("--title", default="")
+    ap.add_argument("--toc-levels", type=int, default=2,
+                    help="目录收录到几级标题（1=编/章，2=含每章小节）")
     args = ap.parse_args()
 
     blocks = []
@@ -538,13 +542,18 @@ def main():
     title = next((b[2] for b in blocks if b[0] == "directive" and b[1] == "title"), "")
     sub = next((b[2] for b in blocks if b[0] == "directive" and b[1] == "subtitle"), "")
     lines = [b[2] for b in blocks if b[0] == "directive" and b[1] == "cover"]
+    header = next((b[2] for b in blocks
+                   if b[0] == "directive" and b[1] == "header"), "")
+    if not header:
+        header = " · ".join(x for x in (title, sub) if x)
 
     pages = None
     if args.toc and os.path.isfile(args.toc):
         pages = json.load(open(args.toc, encoding="utf-8"))
 
-    entries = collect_headings(blocks)
+    entries = collect_headings(blocks, args.toc_levels)
     bk = Book()
+    bk.header_text = header
     bk.title_page(title, sub, lines)
     bk.render(blocks, toc_entries=entries, pages=pages)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

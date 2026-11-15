@@ -206,6 +206,7 @@ check('vk_chain has install plan', chainSrc.includes('_install_plan'));
 check('doctor emits installPlan', chainSrc.includes('"installPlan"'));
 const idxSrc2 = readFileSync(join(ROOT, 'index.js'), 'utf8');
 check('vk_doctor renders installPlan', idxSrc2.includes('d.installPlan'));
+check('no nested ytdlp list', !/\[ytdlp,\s*"--/.test(chainSrc + pipeSrc));
 check('no silent auto-install', !/pip install[^`\n]*\+\+|subprocess[^\n]*pip install/.test(chainSrc));
 
 /* 5. 列链 */
