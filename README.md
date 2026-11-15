@@ -235,33 +235,49 @@ python pipeline/vk_chain.py bookplan --video-id BV1xx...              # 编/章�
 
 ## 成书子链（可选：把卡片汇编成一本书）
 
-提示词里出现「参考书（简介+目录+正文+附录）」时，主链会在 ookPlan 之后走 ookBuild，调用子链 gen.video-to-knowledge.book：
+提示词里出现「参考书（简介+目录+正文+附录）」时，主链会在 `bookPlan` 之后走 `bookBuild`，调用子链 `gen.video-to-knowledge.book`：
 
-`	ext
+```text
 assembleBook  book/front.md + parts/partNN.md + parts/appX.md → book/book_all.md
 buildPass1    第一遍排版（目录占位，行数=真实条目数）→ book/pass1.docx + headings.json
-pdfPass1      pass1.docx → pass1.pdf（无转换器则 skipped）
-measureToc    从 PDF 按字号定位每个标题 → book/toc.json
-buildFinal    第二遍排版，把页码填进目录 → reports/…docx
-pdfFinal      reports/…docx → reports/…pdf（可选）
-`
+pdfPass1      pass1.docx → pass1.pdf     ← 只为量页码，中间件，不交付
+measureToc    从这份 PDF 按字号定位每个标题 → book/toc.json
+buildFinal    第二遍排版，把页码填进目录 → reports/…docx   ← 交付物
+```
 
-两遍排版是关键：占位行数与真实条目一致，所以第二遍分页不变、页码可以直接沿用。实测 46 个标题、120 页，复测页码差异 0。
+两遍排版是关键：占位行数与真实条目一致，所以第二遍分页不变、页码可以直接沿用。实测 22 章、163 页、35 个标题，复测页码差异 0。
 
-依赖与降级：
+### 交付物：DOCX + Markdown，默认不出 PDF
+
+| 产物 | 是否交付 | 说明 |
+|---|---|---|
+| `reports/…docx` | ✅ 主交付 | 排版完成、目录带真实页码，可直接打开/打印/二次编辑 |
+| `reports/…md` | ✅ 主交付 | 全文纯文本，可 grep、可版本管理、可再排版 |
+| `book/pass1.pdf` | ❌ 中间件 | 只在量页码时用，随时可删 |
+| `reports/…pdf` | ❌ 默认不生成 | 只有明确要"固定分页对外分发"时才转 |
+
+理由：PDF 把排版结果冻死了，内容一改就得重排两遍；而 DOCX 能改、MD 能搜，两者已经覆盖"读"和"改"两个场景。
+
+真需要 PDF 时手动转一次即可：
+
+```bash
+python pipeline/book_pdf.py --in reports/xxx.docx --out reports/xxx.pdf
+```
+
+### 依赖与降级
 
 | 依赖 | 缺失时 |
 |---|---|
-| python-docx | 报 BOOK_DEPS_MISSING + 安装提示（退出码 9），不吐栈 |
-| PDF 转换器（LibreOffice Kit / soffice） | PDF 记 skipped，DOCX 照常交付 |
+| python-docx | 报 `BOOK_DEPS_MISSING` + 安装提示（退出码 9），不吐栈 |
+| PDF 转换器（LibreOffice Kit / soffice） | 量不了页码 → 目录退化为无页码，DOCX 照常交付 |
 
-PDF 转换器用环境变量指定，不写进仓库：
+转换器用环境变量指定，不写进仓库：
 
-`ash
+```bash
 export VK_PDF_NODE=<node 可执行文件>
 export VK_PDF_CLI=<libreoffice-kit cli.js>
 # 或 VK_SOFFICE=<soffice.exe>
-`
+```
 
 ## 五个工具
 

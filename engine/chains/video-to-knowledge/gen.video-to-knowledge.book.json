@@ -12,9 +12,9 @@
     "所有 exec 只经 ${python} 与 ${workDir} 占位符，路径不写死。"
   ],
   "acceptance": [
-    "产出 $.book = {docx, pdf, pages, headings, tocMatched, cjk}",
-    "目录条目数 = 实际标题数，且第二遍 PDF 复测页码与第一遍一致",
-    "PDF 缺失时 pdf 字段为 null 且 verdict=done_no_pdf，DOCX 仍在"
+    "产出 $.book = {docx, pages, headings, tocMatched, cjk}——默认交付 DOCX 与卡片 Markdown，不出 PDF",
+    "目录条目数 = 实际标题数，且 DOCX 目录页码与中间 PDF 复测一致",
+    "中间 PDF 仅用于量页码，可删；没有转换器时退化为无页码目录，DOCX 仍照常交付"
   ],
   "boundaries": [
     "不生成正文内容（正文由模型写 book/parts/*.md）",
@@ -24,32 +24,31 @@
   "interfaces": {
     "assembleBook": "in: $.input.bookDir；out: $.bookSrc；emit bookSrc.ready",
     "buildPass1": "in: $.bookSrc.out；out: $.bookPass1；emit bookPass1.ready",
-    "pdfPass1": "in: $.bookPass1.docx；out: $.pdfPass1；emit pdfPass1.done",
+    "pdfPass1": "in: $.bookPass1.docx；out: $.pdfPass1（中间件，仅量页码）；emit pdfPass1.done",
     "measureToc": "in: $.pdfPass1.pdf + headings.json；out: $.toc；emit toc.ready",
-    "buildFinal": "in: $.bookSrc + $.toc；out: $.book；emit book.ready",
-    "pdfFinal": "in: $.book.docx；out: $.book.pdf；emit book.pdf.done",
+    "buildFinal": "in: $.bookSrc + $.toc；out: $.book（交付 DOCX）；emit book.ready",
     "bookDone": "in: $.book；out: $.output；halt"
   },
   "regressionTests": [
     {
       "id": "RT-VK-BOOK-1",
       "type": "happy",
-      "input": "{bookDir: \"book\"}，且 front.md + parts/part01..N.md + appA..G.md 齐全",
-      "expect": "产出 DOCX（含目录页码）与 PDF，tocMatched == headings",
+      "input": "{bookDir: \"book\"}，front + parts + appA..G 齐全",
+      "expect": "产出带页码目录的 DOCX；中间 PDF 存在但不算交付",
       "rationale": "标准成书主路径"
     },
     {
       "id": "RT-VK-BOOK-2",
       "type": "edge",
-      "input": "没有 PDF 转换器（无 VK_PDF_NODE / soffice）",
-      "expect": "pdfPass1/pdfFinal 记 skipped，最终仍产出 DOCX，verdict=done_no_pdf",
-      "rationale": "PDF 是可选产物，缺它不能阻断交付"
+      "input": "没有 PDF 转换器",
+      "expect": "pdfPass1 记 skipped → 目录无页码；DOCX 照常交付",
+      "rationale": "PDF 只是中间件，缺它不能阻断交付"
     },
     {
       "id": "RT-VK-BOOK-3",
       "type": "negative",
       "input": "运行环境没有 python-docx",
-      "expect": "build 退出码 9 + BOOK_DEPS_MISSING + 安装提示，不吐栈",
+      "expect": "build 退出码 9 + BOOK_DEPS_MISSING + 安装提示",
       "rationale": "依赖缺失要给可执行建议"
     }
   ],
@@ -144,14 +143,14 @@
       "id": "pdfPass1",
       "kind": "fn",
       "use": "agentStep",
-      "title": "第一遍转 PDF（用于量真实页码；无转换器则跳过）",
+      "title": "第一遍转 PDF（仅用于量页码，不是交付物）",
       "trigger": [
         {
           "on": "signal.bookPass1.ready"
         }
       ],
       "in": {
-        "action": "运行 `python pipeline/book_pdf.py --in book/pass1.docx --out book/pass1.pdf`：优先用 VK_PDF_NODE + VK_PDF_CLI（LibreOffice Kit），其次 soffice；都没有则输出 {skipped:true} 并退出 0。",
+        "action": "运行 `python pipeline/book_pdf.py --in book/pass1.docx --out book/pass1.pdf`：这份 PDF **只为量出每个标题的真实页码**，属于内部中间件，不交付、可随时删除。优先用 VK_PDF_NODE + VK_PDF_CLI（LibreOffice Kit），其次 soffice；都没有则 skipped。",
         "visible": "🖨️ [pdfPass1] DOCX → PDF（量页码用）…",
         "resultPath": "$.pdfPass1"
       },
@@ -266,51 +265,13 @@
       }
     },
     {
-      "id": "pdfFinal",
-      "kind": "fn",
-      "use": "agentStep",
-      "title": "最终转 PDF（可选）",
-      "trigger": [
-        {
-          "on": "signal.book.ready"
-        }
-      ],
-      "in": {
-        "action": "运行 `python pipeline/book_pdf.py --in reports/中国近现代史纲要_参考书.docx --out reports/中国近现代史纲要_参考书.pdf`；无转换器则 skipped。",
-        "visible": "🖨️ [pdfFinal] 最终 DOCX → PDF…",
-        "resultPath": "$.bookPdf"
-      },
-      "out": "$.bookPdf",
-      "maxRuns": 1,
-      "emit": [
-        "book.pdf.done"
-      ],
-      "declares": [
-        "book.pdf.done"
-      ],
-      "writes": [
-        "$.bookPdf"
-      ],
-      "exec": {
-        "runner": "${python}",
-        "script": "${pluginRoot}/pipeline/book_pdf.py",
-        "cwd": "${workDir}",
-        "args": [
-          "--in",
-          "reports/中国近现代史纲要_参考书.docx",
-          "--out",
-          "reports/中国近现代史纲要_参考书.pdf"
-        ]
-      }
-    },
-    {
       "id": "bookDone",
       "kind": "fn",
       "use": "deliver",
       "title": "成书收口",
       "trigger": [
         {
-          "on": "signal.book.pdf.done"
+          "on": "signal.book.ready"
         },
         {
           "on": "signal.bookSrc.failed"
@@ -322,13 +283,12 @@
           "ok": true
         },
         "completionPackage": {
-          "scope": "参考书成书：拼稿 → 两遍排版 → 量页码 → DOCX/PDF",
+          "scope": "参考书成书：拼稿 → 两遍排版 → 量页码 → DOCX（+ 卡片 MD）",
           "evidence": {
             "note": "证据层（机器出）",
             "bookSrc": "=$.bookSrc",
             "book": "=$.book",
-            "toc": "=$.toc",
-            "pdf": "=$.bookPdf"
+            "toc": "=$.toc"
           }
         }
       },

@@ -162,9 +162,12 @@ const bookPath = join(ROOT, 'engine', 'chains', 'video-to-knowledge',
 check('file gen.video-to-knowledge.book.json', existsSync(bookPath));
 const book = JSON.parse(readFileSync(bookPath, 'utf8'));
 const bookIds = book.nodes.map((n) => n.id);
-for (const id of ['assembleBook', 'buildPass1', 'pdfPass1', 'measureToc', 'buildFinal', 'pdfFinal']) {
+for (const id of ['assembleBook', 'buildPass1', 'pdfPass1', 'measureToc', 'buildFinal']) {
   check(`book node ${id}`, bookIds.includes(id));
 }
+// 默认交付 DOCX + MD：不得再有最终 PDF 节点
+check('book chain has no final pdf',
+  !bookIds.includes('pdfFinal') && JSON.stringify(book.acceptance).includes('不出 PDF'));
 const bookExec = book.nodes.filter((n) => n.exec);
 check('book exec all use ${python}', bookExec.every((n) => n.exec.runner === '${python}'));
 check('book exec all use ${workDir}', bookExec.every((n) => n.exec.cwd === '${workDir}'));
