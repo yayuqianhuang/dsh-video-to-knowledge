@@ -14,7 +14,7 @@
   ],
   "acceptance": [
     "产出 $.meta（含 durationSec）与 $.transcript（含 coveredSec/segmentCount）",
-    "字幕内容级校验：任一已写分 P 关键词命中 0 或出现异物词 → audit.mismatch",
+    "字幕内容校验：标题锚点覆盖率极低且跨分 P 相似度离群 → audit.mismatch；只有一项异常 → review；判不了 → unverified 并显式警告，绝不静默判 ok",
     "字幕不可用或串台 → 走 asrFallback；ASR 仍失败才早停，不产出空卡片",
     "清洗后产出 clean.jsonl + chunks[]，时间戳单调递增",
     "分块编译每个 [mm:ss] 均命中该块段表白名单，伪造条目剔除并计入 dropped",
@@ -186,10 +186,7 @@
           "transcript",
           "--url",
           "${$.input.url}"
-        ],
-        "env": {
-          "BILI_COOKIES": "${$.cred.cookiesPath}"
-        }
+        ]
       }
     },
     {
@@ -240,15 +237,15 @@
       "id": "auditTranscript",
       "kind": "fn",
       "use": "agentStep",
-      "title": "字幕内容校验：关键词命中 + 异物词，识别串台字幕",
+      "title": "字幕内容校验：标题锚点 + 跨分 P 相似度（不依赖学科词表）",
       "trigger": [
         {
           "on": "signal.transcript.ready"
         }
       ],
       "in": {
-        "action": "运行 `python pipeline/vk_chain.py audit --video-id <videoId>`：按分 P 标题里的章号取该章关键词表（如第一章：鸦片战争/虎门销烟/南京条约…），统计命中数与异物词（评测/iPhone/靶场…）；命中 ≥2 判 ok，1 判 weak，0 或有异物词判 mismatch。输出 $.audit={parts[],mismatched[],weak[],ok,verdict}。退出码 4=SUBTITLE_MISMATCH。**只比时长拦不住串台**——那支 iPhone 评测恰好也是 22 分钟，会全项通过。",
-        "visible": "🕵️ [auditTranscript] 字幕内容校验（关键词命中 / 异物词，防串台）…",
+        "action": "运行 `python pipeline/vk_chain.py audit --video-id <videoId>`：优先读 by_p/*.txt，缺失时直接读 transcript.jsonl。判据由视频标题/分P标题自动生成（不再写死某一学科的关键词）：①标题词在字幕里的覆盖率；②每个分P与其余分P的 4-gram 相似度中位数。覆盖率极低且相似度显著离群 → mismatch；只有一项异常 → weak；没有字幕/分P太少/标题无可用词 → unverified（显式警告，绝不静默判 ok）。输出 $.audit={verdict,mismatched[],weak[],unverified[],warning,parts[]}。需要人工指定关键词时传 --expect \"1=词1,词2;2=词3\"。",
+        "visible": "🕵️ [auditTranscript] 字幕内容校验（标题锚点 / 跨分P相似度，防串台）…",
         "resultPath": "$.audit"
       },
       "out": "$.audit",
@@ -257,7 +254,8 @@
         "audit.done"
       ],
       "declares": [
-        "audit.done"
+        "audit.done",
+        "audit.failed"
       ],
       "writes": [
         "$.audit"
@@ -274,31 +272,31 @@
       },
       "onError": {
         "emit": [
-          "audit.failed"
+          "audit.done"
         ]
       }
     },
     {
       "id": "transcriptGate",
       "kind": "gate",
-      "title": "字幕校验门 / 评审门（覆盖率 + 内容是否串台）",
+      "title": "字幕校验门：内容 verdict + 覆盖率（audit 完成后再判）",
       "trigger": [
         {
-          "on": "signal.transcript.ready"
+          "on": "signal.audit.done"
         }
       ],
       "cases": [
         {
-          "when": "$.audit && $.audit.ok == true && $.meta.durationSec > 0 && $.transcript.segmentCount > 0 && $.transcript.coveredSec / $.meta.durationSec >= 0.6",
+          "when": "$.audit && $.audit.verdict == 'ok' && $.meta.durationSec > 0 && $.transcript.segmentCount > 0 && $.transcript.coveredSec / $.meta.durationSec >= 0.6",
           "emit": "transcript.ok",
           "label": "字幕可用且内容对得上",
-          "reason": "覆盖率 ≥60%，且逐分 P 关键词命中校验通过"
+          "reason": "覆盖率 ≥60%，逐分 P 内容校验通过"
         },
         {
-          "when": "!$.audit && $.meta.durationSec > 0 && $.transcript.segmentCount > 0 && $.transcript.coveredSec / $.meta.durationSec >= 0.6",
+          "when": "$.audit && ($.audit.verdict == 'review' || $.audit.verdict == 'unverified') && $.meta.durationSec > 0 && $.transcript.segmentCount > 0 && $.transcript.coveredSec / $.meta.durationSec >= 0.6",
           "emit": "transcript.ok",
-          "label": "字幕可用（未做内容校验时的旧判据）",
-          "reason": "段落数 > 0 且时间轴覆盖 ≥ 60% 时长"
+          "label": "字幕可用但未完全验证",
+          "reason": "覆盖率达标；内容校验为 review/unverified，继续但在报告里显式警告，建议人工核对"
         }
       ],
       "out": "$.transcriptCheck",
@@ -322,8 +320,8 @@
         }
       ],
       "in": {
-        "action": "运行 `python pipeline/vk_chain.py asr --video-id <videoId> --download --url <url>`：对缺字幕/串台的分 P，用 faster-whisper（int8/CPU）转写；音频只落临时目录、转完即删。faster-whisper 的 PyAV 解码在某些版本组合下会 TypeError，故内部统一用 ffmpeg 解码成 numpy。输出 $.asr={model,parts[],failed[],verdict}。退出码 6=ASR_UNAVAILABLE（缺依赖/模型），7=ASR_FAILED（部分或全部失败）。",
-        "visible": "🎙️ [asrFallback] 平台字幕不可用 → 本地 ASR 兜底（音频转完即删）…",
+        "action": "运行 `python pipeline/vk_chain.py asr --video-id <videoId> --parts <$.audit.mismatched> --download --merge --audit --url <url>`：只对内容校验判为 mismatch/empty 的分 P，用 faster-whisper（int8/CPU）重转；音频只落临时目录、转完即删。--merge 会用 ASR 轨重建 transcript.jsonl（ASR 优先于平台轨），--audit 再校验一次并随结果返回。提示词由视频标题生成，不再写死学科。输出 $.asr={model,parts[],failed[],rebuilt,audit,verdict}。退出码 6=ASR_UNAVAILABLE（缺 ffmpeg/依赖/模型），7=全部失败。",
+        "visible": "🎙️ [asrFallback] 对串台分 P 做本地 ASR 重转，并重建 transcript（音频转完即删）…",
         "resultPath": "$.asr"
       },
       "out": "$.asr",
@@ -346,7 +344,11 @@
           "asr",
           "--video-id",
           "${$.meta.videoId}",
+          "--parts",
+          "${$.audit.mismatched}",
           "--download",
+          "--merge",
+          "--audit",
           "--url",
           "${$.input.url}"
         ]
@@ -386,9 +388,11 @@
             "note": "叙述层（AI 写）：面向人说明卡在哪、缺什么、需要你做什么"
           },
           "evidence": {
-            "note": "证据层（机器出）：meta 与 transcript 的真实计数，模型无法改写",
+            "note": "证据层（机器出）：meta / transcript / audit 的真实计数，模型无法改写",
             "meta": "=$.meta",
-            "transcript": "=$.transcript"
+            "transcript": "=$.transcript",
+            "audit": "=$.audit",
+            "asr": "=$.asr"
           }
         }
       },
@@ -528,13 +532,14 @@
         "completionPackage": {
           "scope": "素材准备：抓元数据 → 取字幕 → 清洗 → 分块编译 → 综述",
           "narrative": {
-            "summary": "= \"素材准备完成：产出 \" + $.card.files.length + \" 张卡片，字幕来源 \" + $.transcript.source",
-            "note": "叙述层（AI 写）：面向人说明素材从哪来、产出了什么"
+            "summary": "= \"素材准备完成：产出 \" + $.card.files.length + \" 张卡片；字幕内容校验 \" + ($.card.audit ? $.card.audit.verdict : $.audit.verdict)",
+            "note": "叙述层（AI 写）：面向人说明素材从哪来、字幕是否通过内容校验；有 warning 时必须原样告知用户"
           },
           "evidence": {
             "note": "证据层（机器出）：以下由 agentStep 节点（脚本计数）生成，模型无法改写",
             "meta": "=$.meta",
             "transcript": "=$.transcript",
+            "audit": "=$.audit",
             "clean": "=$.clean",
             "chunks": "=$.chunks",
             "card": "=$.card"

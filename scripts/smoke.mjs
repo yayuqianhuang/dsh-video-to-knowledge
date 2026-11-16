@@ -11,6 +11,7 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -146,8 +147,11 @@ check('asr triggered by mismatch or fail',
   !!asrNode && ['transcript.mismatch', 'transcript.fail']
     .every((s) => JSON.stringify(asrNode.trigger).includes(s)));
 const gate = prep.nodes.find((n) => n.id === 'transcriptGate');
-check('gate checks content not just coverage',
-  !!gate && JSON.stringify(gate).includes('$.audit.ok'));
+check('gate checks content verdict not just coverage',
+  !!gate && JSON.stringify(gate).includes('$.audit.verdict'));
+const prepSrc = readFileSync(prepPath, 'utf8');
+check('asr repairs transcript (--merge)', prepSrc.includes('"--merge"'));
+check('asr re-audits after repair (--audit)', prepSrc.includes('"--audit"'));
 
 const mainIds = chain.nodes.map((n) => n.id);
 for (const id of ['templateParse', 'bookPlan', 'bookGate', 'bookBuild']) {
@@ -191,6 +195,26 @@ for (const cmd of ['audit', 'probe', 'asr', 'template', 'bookplan']) {
   check(`vk_signals registers ${cmd}`, sigSrc.includes(`"${cmd}"`) || sigSrc.includes(`'${cmd}'`));
 }
 check('chain imports vk_signals', chainSrc.includes('vk_signals'));
+
+/* 4f. 判据不能写死学科：换主题/换学科还要能判（真实反馈：高数课 P1/P2 抽到电竞采访） */
+const auditSrc = readFileSync(join(ROOT, 'pipeline', 'vk_audit.py'), 'utf8');
+check('no hardcoded subject keyword table',
+  !sigSrc.includes('AUDIT_KEYWORDS') && !sigSrc.includes('鸦片战争'));
+check('audit has generic title anchors', auditSrc.includes('title_terms'));
+check('audit compares parts by similarity', auditSrc.includes('peer_med'));
+check('audit falls back to transcript.jsonl', auditSrc.includes('transcript.jsonl'));
+check('audit never silently ok', auditSrc.includes('unverified') && auditSrc.includes('verdict'));
+check('doctor separates optional ASR deps',
+  chainSrc.includes('optionalMissing') && chainSrc.includes('asrReady'));
+check('detectPython cache invalidates on config',
+  idxSrc.includes('_pythonCache') && /const key = explicit/.test(idxSrc));
+
+/* 4g. 跨学科审计可执行回归：5 分 P 高数课，P2/P3 换成电竞解说 */
+const py = process.env.VK_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+const fixture = spawnSync(py, [join(ROOT, 'scripts', 'test-audit.py')],
+  { encoding: 'utf8', timeout: 120_000 });
+check('cross-subject audit fixture (math + esports)',
+  fixture.status === 0, (fixture.stdout || '') + (fixture.stderr || ''));
 
 /* 4e. 发版工作流：推 tag 即发版，用内置 token（不落长期密钥） */
 const relPath = join(ROOT, '.github', 'workflows', 'release.yml');

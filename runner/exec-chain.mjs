@@ -222,6 +222,7 @@ const report = {
   signals: {
     env: pick('$.env'),
     quality: pick('$.quality'),
+    audit: pick('$.card.audit'),
     dedupe: pick('$.dedupe') && {
       hit: pick('$.dedupe.hit'),
       queueCount: pick('$.dedupe.queueCount'),

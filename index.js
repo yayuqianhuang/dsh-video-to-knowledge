@@ -256,21 +256,28 @@ function exeOf(cmd, prefixArgs = []) {
   })
 }
 
-let _python
+let _pythonCache = { key: null, value: null }
 async function detectPython() {
-  if (_python !== undefined) return _python
   const explicit = cfg('pythonPath')
-  if (explicit && existsSync(explicit)) return (_python = explicit)
-  if (process.platform === 'win32') {
+  // 缓存必须跟配置一起失效：改了 pythonPath 但进程不重启时，旧实现会一直用旧解释器。
+  const key = explicit || '(auto)'
+  if (_pythonCache.key === key) return _pythonCache.value
+
+  let found = null
+  if (explicit && existsSync(explicit)) {
+    found = explicit
+  } else if (process.platform === 'win32') {
     const viaPy = await exeOf('py', ['-3'])
-    if (viaPy && existsSync(viaPy)) return (_python = viaPy)
+    if (viaPy && existsSync(viaPy)) found = viaPy
   }
-  for (const c of ['python3', 'python']) {
-    const e = await exeOf(c)
-    if (e && existsSync(e)) return (_python = e)
+  if (!found) {
+    for (const c of ['python3', 'python']) {
+      const e = await exeOf(c)
+      if (e && existsSync(e)) { found = e; break }
+    }
   }
-  _python = null
-  return null
+  _pythonCache = { key, value: found }
+  return found
 }
 
 /* ------------------------------------------------------------------ 工作目录 */
@@ -487,11 +494,13 @@ export function apply(ctx) {
           return '缺失（未提供 cookie）'
         })()}（模式 ${d.credMode}）`,
         `缺失项      ${d.missing.length ? d.missing.join(', ') : '无'}`,
+        `可选缺失    ${(d.optionalMissing || []).length ? d.optionalMissing.join(', ') + '（仅本地 ASR 兜底需要，有字幕的视频可忽略）' : '无'}`,
+        `ASR 兜底    ${d.asrReady ? '可用' : '不可用（只影响无字幕/串台视频；需 ffmpeg + faster-whisper）'}`,
         `工作目录    ${wd}`,
         `配置文件    ${CONFIG_FILE}${existsSync(CONFIG_FILE) ? '' : '（尚未创建，可用 vk_config 写）'}`,
       ]
-      if (d.missing.length) {
-        lines.push('', '修复建议：')
+      if (d.missing.length || (d.optionalMissing || []).length) {
+        lines.push('', d.missing.length ? '修复建议：' : '可选依赖（仅本地 ASR 兜底需要）：')
         if (Array.isArray(d.installPlan) && d.installPlan.length) {
           for (const p of d.installPlan) {
             lines.push(`· 安装 ${p.tool}（${p.os}），任选一条：`)
@@ -512,8 +521,9 @@ export function apply(ctx) {
   ctx.tools.register({
     name: 'vk_prepare',
     description:
-      '准备知识卡素材：抓视频元数据 → 抓字幕（B 站需登录 cookie）→ 清洗切块 → 产出按分 P 的素材包。' +
-      '返回每个分 P 的素材文件路径与顺序时间轴，供你（模型）撰写卡片正文。' +
+      '准备知识卡素材：抓视频元数据 → 抓字幕（B 站需登录 cookie）→ 清洗切块 → 内容校验（防串台）' +
+      '→ 产出按分 P 的素材包。返回每个分 P 的素材文件、内容校验结论、可按批写卡片的 batches[]。' +
+      '检测到字幕串台时可传 repairSubtitles=true 走本地 ASR 重转（需 ffmpeg + faster-whisper）。' +
       '完成后调用 vk_run 组装、校验并落盘。',
     parameters: {
       type: 'object',
@@ -524,11 +534,15 @@ export function apply(ctx) {
         cookiesPath: { type: 'string', description: 'B 站 cookie 文件（Netscape 格式）。仅注入子进程，不落盘不打印' },
         lang: { type: 'string', default: 'zh-CN' },
         refresh: { type: 'boolean', default: false, description: 'true=忽略缓存重新抓取' },
+        repairSubtitles: {
+          type: 'boolean', default: false,
+          description: 'true=检测到字幕串台时，对可疑分 P 走本地 ASR 重转并重建素材（需 ffmpeg + faster-whisper）',
+        },
       },
       required: ['url'],
     },
     output: textOutput(),
-    async execute({ url, outputDir, workDir, cookiesPath, lang = 'zh-CN', refresh = false } = {}) {
+    async execute({ url, outputDir, workDir, cookiesPath, lang = 'zh-CN', refresh = false, repairSubtitles = false } = {}) {
       // schema 同时声明了 outputDir 与兼容别名 workDir；此前只解构 workDir，
       // 导致按文档传 outputDir 时被静默忽略、产物落到配置文件/工作区的目录。
       const wd = resolveWorkDir(outputDir || workDir)
@@ -558,12 +572,60 @@ export function apply(ctx) {
       const built = await runPy('vk_pipeline.py', ['build', '--video-id', videoId, '--url', url], { workDir: wd })
       if (!built.ok) return textResult(`清洗/切块失败：${built.error}`)
 
+      // 内容校验：判据由视频标题生成，换学科也有效；判不了会明确 unverified，不静默 ok。
+      const runAudit = async () => {
+        const r = await runPy('vk_chain.py', ['audit', '--video-id', videoId], { workDir: wd })
+        if (r.ok && r.data) return r.data
+        return { ok: false, verdict: 'unverified', warning: `内容校验执行失败：${r.error || '未知错误'}`,
+          mismatched: [], weak: [], unverified: [], parts: [] }
+      }
+      let audit = await runAudit()
+      let repaired = null
+      let repairError = null
+      if (audit.verdict === 'mismatch' && repairSubtitles) {
+        const partsArg = (audit.mismatched || []).join(',')
+        const ar = await runPy('vk_chain.py',
+          ['asr', '--video-id', videoId, '--parts', partsArg, '--download', '--merge', '--audit', '--url', url],
+          { workDir: wd, cookiesPath: ck, timeoutMs: 6 * 3600_000 })
+        if (ar.ok && ar.data) {
+          repaired = ar.data
+          if (ar.data.rebuilt) {
+            const rebuilt = await runPy('vk_pipeline.py', ['build', '--video-id', videoId, '--url', url], { workDir: wd })
+            if (rebuilt.ok) audit = await runAudit()
+            else repairError = rebuilt.error
+          } else if (ar.data.audit) {
+            audit = ar.data.audit
+          }
+        } else {
+          repairError = ar.error
+        }
+      }
+
       const byp = join(wd, 'runs', videoId, 'by_p')
       let materials = []
       try {
         materials = readdirSync(byp).filter((f) => /^p\d+\.txt$/.test(f)).sort()
           .map((f) => ({ part: Number(f.slice(1, 3)), file: join(byp, f) }))
       } catch { /* 目录可能不存在 */ }
+
+      // 长课分批：一次读太多素材会把单轮 token 打爆。按 4 个分 P / 4 万字切批，
+      // 每批写完立刻 vk_run，再写下一批（已落盘的卡片不会重复写）。
+      const batches = []
+      let cur = { parts: [], chars: 0 }
+      const flush = () => {
+        if (!cur.parts.length) return
+        batches.push({ index: batches.length + 1, parts: cur.parts.slice(),
+          chars: cur.chars, estTokens: Math.ceil(cur.chars / 1.5) })
+        cur = { parts: [], chars: 0 }
+      }
+      for (const m of materials) {
+        let size = 0
+        try { size = statSync(m.file).size } catch { /* ignore */ }
+        if (cur.parts.length && (cur.parts.length >= 4 || cur.chars + size > 40000)) flush()
+        cur.parts.push(m.part)
+        cur.chars += size
+      }
+      flush()
 
       // 时长/段数从 manifest.json 取（transcript.json 的字段名与这里不一致，曾导致 NaN）
       let mf = null
@@ -575,6 +637,18 @@ export function apply(ctx) {
       const partCount = mf && Array.isArray(mf.parts) && mf.parts.length
         ? mf.parts.length : (tr.data.partCount || materials.length)
 
+      const warnings = []
+      if (audit.warning) warnings.push(audit.warning)
+      if (audit.verdict === 'mismatch' && !repairSubtitles) {
+        warnings.push(`这些分 P 的字幕疑似串台：${(audit.mismatched || []).join(',')}。` +
+          '若要自动修，带 repairSubtitles=true 重跑（需 ffmpeg + faster-whisper）；' +
+          '也可以人工挑出没有串台的分 P 再写卡片')
+      }
+      if (repairError) warnings.push(`ASR 修复失败：${repairError}`)
+      if (audit.verdict !== 'ok' && audit.verdict !== 'mismatch') {
+        warnings.push('本批字幕未通过完整内容校验，建议人工核对分 P 是否串台')
+      }
+
       return textResult(j({
         videoId,
         title: meta.data.title,
@@ -583,11 +657,18 @@ export function apply(ctx) {
         segmentCount: segCount,
         coveredSec: tr.data.coveredSec,
         parts: partCount,
+        audit: { verdict: audit.verdict, mismatched: audit.mismatched || [],
+          weak: audit.weak || [], unverified: audit.unverified || [], warning: audit.warning || '' },
+        repaired: repaired ? { parts: (repaired.parts || []).filter((x) => x.segments || x.reused) } : null,
+        warnings: [...new Set(warnings)],
         workDir: wd,
         materialDir: byp,
         materials,
+        batches,
         next: [
-          `1) 逐个读 materials[].file，按分 P 写卡片正文到 ${join(wd, 'cards')}/card-${videoId}-pNN.md`,
+          batches.length > 1
+            ? `1) 长课请分批写：一次只读 batches[n].parts 的素材，写完立刻 vk_run；共 ${batches.length} 批`
+            : `1) 逐个读 materials[].file，按分 P 写卡片正文到 ${join(wd, 'cards')}/card-${videoId}-pNN.md`,
           '2) 正文只要 Markdown（标题/一句话结论/核心要点/章节时间轴/关键概念/可执行清单/存疑），不要写 frontmatter',
           '3) 每个 [mm:ss] 必须来自素材里真实出现过的时间戳',
           `4) 写完调用 vk_run（videoId=${videoId}）完成组装、校验与落盘`,
@@ -666,6 +747,11 @@ export function apply(ctx) {
         if (bad.includes('acquireTranscript')) {
           hints.push('· acquireTranscript 失败：多半是没给 cookiesPath（B 站 need_login_subtitle），或 cookie 已过期')
         }
+        if (bad.includes('asrFallback')) {
+          hints.push('· asrFallback 失败：字幕疑似串台，但本地 ASR 不可用或失败。' +
+            '装 ffmpeg + faster-whisper（跑 vk_doctor 看 asrReady），或换有正确字幕的源；' +
+            '也可用 vk_prepare 的 repairSubtitles=true 重跑')
+        }
         if (report.signals?.quality?.ok === false) {
           hints.push('· quality 不过：看 issues —— 常见是 [mm:ss] 超出该分 P 区间、字数 <500、frontmatter 缺字段')
         } else if (bad.includes('qualityCheck')) {
@@ -683,8 +769,13 @@ export function apply(ctx) {
       const d = report.signals?.dedupe
       const v = report.signals?.verify
       const o = report.signals?.outline
+      const au = report.signals?.audit
+      const auditLine = au && au.verdict && au.verdict !== 'ok'
+        ? `⚠ ${au.warning || '本批字幕未通过内容校验，建议人工核对'}\n`
+        : (au ? `· 字幕内容校验 ${au.verdict}\n` : '')
       return textResult(
         `链跑通 ✔\n` +
+        auditLine +
         `· 卡片 ${q?.stats?.files ?? '?'} 张，quality ok=${q?.ok}\n` +
         `· 查重 queue=${d?.queueCount ?? '?'}，hit=${d?.hit}\n` +
         (v ? `· 核验 ${v.actual}/${v.expected} ok=${v.ok}\n` : '· 核验 跳过（没有待写入文件）\n') +

@@ -6,6 +6,9 @@
 
     meta        → $.meta        （视频元数据，含各分 P 时长）
     transcript  → $.transcript  （字幕段表，含 segmentCount / coveredSec）
+    audit       → $.audit        （内容校验：标题锚点 + 跨分P相似度，防串台）
+    probe       → $.subsProbe    （多轮探测平台字幕轨，按时长择优）
+    asr         → $.asr          （本地 ASR 兜底；--merge 重建 transcript）
     cards       → $.card        （从 agent 写好的正文组装卡片对象）
     quality     → $.quality     （五项机器校验：frontmatter/时间戳/字数/敏感/占位符）
     outline     → $.outline     （把卡片要点灌进大纲）
@@ -35,6 +38,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vk_pipeline as vp  # noqa: E402
+import vk_audit  # noqa: E402
 
 
 def emit(obj):
@@ -246,25 +250,9 @@ def _fetch_and_convert(url, vid, meta, a):
                 f"（示例：{loose[0]}）。可手动重命名为 01_xxx.srt 后重试，或反馈此文件名格式", code=3)
         die("NO_TRANSCRIPT：yt-dlp 没有下载到任何 .srt（cookie 失效 / 无 AI 字幕 / 语言代码不对）", code=3)
 
-    records, stats = [], []
-    for p in sorted(meta.get("parts") or [], key=lambda x: x["index"]):
-        idx = p["index"]
-        if idx not in srts:
-            continue
-        off = p.get("offsetSec", 0)
-        n = 0
-        for s, e, text in vp.parse_srt(srts[idx]):
-            records.append({"idx": len(records),
-                            "startSec": int(round(s + off)),
-                            "endSec": int(round(e + off)),
-                            "text": text})
-            n += 1
-        stats.append({"index": idx, "segments": n})
-
-    tpath = os.path.join(viddir, "transcript.jsonl")
-    with open(tpath, "w", encoding="utf-8", newline="\n") as fh:
-        for r in records:
-            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    records, stats, missing = vp.rebuild_transcript(viddir, meta)
+    if missing:
+        sys.stderr.write("WARN: 分 P %s 没有可用字幕，已跳过\n" % missing)
     return records, stats
 
 # ---------------------------------------------------------------- doctor / credential
@@ -411,11 +399,17 @@ def cmd_doctor(a):
     ytdlp_cmdline = vp.ytdlp_cmd(getattr(a, "ytdlp", None))
     ytdlp = ytdlp_exe or (ytdlp_cmdline[-1] if ytdlp_cmdline else None)
     ffmpeg = _find_ffmpeg()
+    has_whisper = _has_whisper()
     missing = []
+    optional = []
     if not ytdlp_cmdline:
         missing.append("yt-dlp")
+    # ffmpeg / faster-whisper 只在"平台字幕不可用、需要本地 ASR 兜底"时才必需。
+    # 有字幕的视频不装 ffmpeg 也能跑，不能把它们放进硬缺失把整条链卡死。
     if not ffmpeg:
-        missing.append("ffmpeg")
+        optional.append("ffmpeg")
+    if not has_whisper:
+        optional.append("faster-whisper")
 
     cred = _credential()
 
@@ -432,22 +426,25 @@ def cmd_doctor(a):
              if cred["loginState"] in ("valid", "partial") else
              {"checked": False, "isLogin": False, "reason": "no-cookies"})
 
-    if cred["loginState"] == "valid":
+    if cached and a.allow_cached:
+        bili_login = "cached"           # 明确标注：走本地缓存，本次不联网取字幕
+    elif cred["loginState"] == "valid":
         if probe.get("checked"):
             bili_login = "valid" if probe.get("isLogin") else "expired"
         else:
             bili_login = "unverified"   # 有凭据，但没联上网/校验失败
-    elif cached and a.allow_cached:
-        bili_login = "cached"           # 明确标注：走本地缓存，未联网校验登录态
     else:
         bili_login = "invalid"
 
     if platform == "bilibili" and bili_login in ("invalid", "expired"):
         missing.append("biliLogin")
+    # 本地缓存模式：meta + transcript 都已存在，本次既不联网取元数据也不取字幕，
+    # 没有 yt-dlp 也应该能继续跑。
+    if cached and a.allow_cached and "yt-dlp" in missing:
+        missing.remove("yt-dlp")
 
-    install_missing = [m for m in missing if m in ("yt-dlp", "ffmpeg")]
-    if not _has_whisper():
-        install_missing.append("faster-whisper")
+    install_missing = [m for m in missing if m == "yt-dlp"] + optional
+    asr_ready = bool(ffmpeg) and has_whisper
 
     return emit({
         "installPlan": _install_plan(install_missing),
@@ -457,7 +454,8 @@ def cmd_doctor(a):
                       else ("binary" if ytdlp_exe else "missing")),
         "ffmpeg": bool(ffmpeg),
         "ffmpegPath": ffmpeg,
-        "whisper": _has_whisper(),
+        "whisper": has_whisper,
+        "asrReady": asr_ready,
         "platform": platform,
         "videoId": vid,
         "biliLogin": bili_login,
@@ -465,22 +463,13 @@ def cmd_doctor(a):
         "cached": cached and a.allow_cached,
         "credMode": cred["mode"],
         "missing": missing,
+        "optionalMissing": optional,
     })
 
 
 def _find_ffmpeg():
-    """跨平台找 ffmpeg：env → PATH → 常见安装位置。"""
-    cands = [os.environ.get("VK_FFMPEG"), shutil.which("ffmpeg")]
-    cands += [
-        "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg", "/usr/bin/ffmpeg",
-    ]
-    la = os.environ.get("LOCALAPPDATA")
-    if la:
-        cands.append(os.path.join(
-            la, "Microsoft", "WinGet", "Packages",
-            "Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe",
-            "ffmpeg-9.0.2-full_build", "bin", "ffmpeg.exe"))
-    return vp._first_existing(cands)
+    """跨平台找 ffmpeg（与 vk_signals 共用同一套探测：PATH/WinGet/imageio）。"""
+    return vp.resolve_ffmpeg()
 
 
 def _has_whisper():
@@ -645,12 +634,23 @@ def cmd_cards(a):
             "totalParts": len(parts),
         })
 
+    # 组装卡片的同时做一次内容校验，把"这批字幕是否可信"随卡片一起带下去。
+    # 这样 vk_run 的最终报告能显示显式警告，而不是在串台时静默成功。
+    try:
+        audit = vk_audit.audit_run(viddir, meta)
+    except Exception as e:
+        audit = {"ok": False, "verdict": "unverified",
+                 "warning": "内容校验执行失败：%s" % str(e)[:160],
+                 "mismatched": [], "weak": [], "unverified": [], "empty": [], "parts": []}
+
     return emit({
         "files": out,
         "summary": f"{len(out)} 张卡片，共 {total_chars} 字",
         "timeline": [{"part": f["partIndex"], "durationSec":
                       (parts.get(f["partIndex"]) or {}).get("durationSec", 0)} for f in out],
         "stats": {"partCount": len(out), "chars": total_chars},
+        "audit": audit,
+        "warning": audit.get("warning") or "",
         "videoId": vid,
         "metaPath": meta_path,
     })

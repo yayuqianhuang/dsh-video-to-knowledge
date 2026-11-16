@@ -820,6 +820,7 @@
           "evidence": {
             "note": "证据层（机器出）：以下由 agentStep 节点（代理执行 + 机器计数）生成，模型无法改写；素材准备阶段（meta / transcript / clean / chunks）的证据见 prepare 子链自身的完成包",
             "card": "=$.card",
+            "audit": "=$.card.audit",
             "dedupe": "=$.dedupe",
             "uploadResults": "=$.uploadResults",
             "verify": "=$.verify",

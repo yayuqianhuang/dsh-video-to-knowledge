@@ -41,6 +41,7 @@
 """
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -105,6 +106,39 @@ def ytdlp_cmd(explicit=None):
     if _module_available("yt_dlp"):
         return [sys.executable, "-m", "yt_dlp"]
     return None
+
+
+def resolve_ffmpeg(explicit=None):
+    """跨平台找 ffmpeg：显式/VK_FFMPEG → PATH → WinGet 包目录 → imageio-ffmpeg。
+
+    只走本地 ASR 才需要 ffmpeg；有平台字幕的视频不装也能跑。
+    winget 安装后当前进程的 PATH 往往还没刷新，所以必须扫包目录。
+    """
+    cands = [explicit, os.environ.get("VK_FFMPEG"),
+             shutil.which("ffmpeg"), shutil.which("ffmpeg.exe")]
+    cands += ["/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg", "/usr/bin/ffmpeg"]
+    la = os.environ.get("LOCALAPPDATA")
+    if la:
+        cands.append(os.path.join(la, "Microsoft", "WinGet", "Links", "ffmpeg.exe"))
+        for pat in (
+            os.path.join(la, "Microsoft", "WinGet", "Packages", "Gyan.FFmpeg*",
+                         "**", "bin", "ffmpeg.exe"),
+            os.path.join(la, "Microsoft", "WinGet", "Packages", "*ffmpeg*",
+                         "**", "bin", "ffmpeg.exe"),
+        ):
+            try:
+                cands += glob.glob(pat, recursive=True)
+            except OSError:
+                pass
+    pf = os.environ.get("ProgramFiles")
+    if pf:
+        cands.append(os.path.join(pf, "ffmpeg", "bin", "ffmpeg.exe"))
+    try:  # pip 装 imageio-ffmpeg 时自带一个静态 ffmpeg，不依赖 PATH
+        import imageio_ffmpeg
+        cands.append(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        pass
+    return _first_existing(cands)
 
 
 def resolve_cleaner(explicit=None):
@@ -402,33 +436,45 @@ def _load_or_synth_meta(viddir, vid, durations=None, url=None):
     }
 
 
+def _srt_rank(path):
+    """SRT 来源优先级：ASR 手工轨 > 探测轨 > 平台下载轨 > 根目录杂项。
+
+    以前"ai-zh 优先"会把 ASR 重转的 01_asr.srt 直接忽略，导致修完串台
+    下游仍在读错误字幕；这里改成来源优先级。
+    """
+    d = os.path.basename(os.path.dirname(path)).lower()
+    n = os.path.basename(path).lower()
+    if d == "manual" or "asr" in n:
+        return 0
+    if d == "subs" and "ai-zh" in n:
+        return 1
+    if d == "subs":
+        return 2
+    return 3
+
+
 def _find_srts(viddir):
-    """在 viddir 与 viddir/subs 两处找 srt，返回 {pIndex: path}。"""
-    found = {}
-    # viddir/manual 是给"手动下载 srt"留的兜底位置
+    """在 viddir / subs / manual 找 srt，按来源优先级返回 {pIndex: path}。"""
+    found, ranks = {}, {}
     for d in (viddir, os.path.join(viddir, "subs"), os.path.join(viddir, "manual")):
         if not os.path.isdir(d):
             continue
         for name in sorted(os.listdir(d)):
             if not name.lower().endswith(".srt"):
                 continue
-            # 优先 ai-zh 轨道，跳过重复的 _pNA 之类
+            # 跳过重复的 _pNA 之类
             if "_pna" in name.lower():
                 continue
             idx = p_index_from_name(name)
             if idx is None:
                 continue
-            if idx in found:
-                prev = os.path.basename(found[idx])
-                prev_na = prev.upper().startswith("NA")
-                new_na = name.upper().startswith("NA")
-                # 同一索引下：编号名（01_）优先于 NA_ 名
-                if new_na and not prev_na:
-                    continue
-                # 别用非 ai-zh 轨道覆盖已找到的 ai-zh 轨道
-                if "ai-zh" not in name.lower() and "ai-zh" in prev.lower():
-                    continue
+            rank = _srt_rank(os.path.join(d, name))
+            if name.upper().startswith("NA"):
+                rank += 0.5          # 同源下编号名优先于 NA_
+            if idx in found and rank >= ranks[idx]:
+                continue
             found[idx] = os.path.join(d, name)
+            ranks[idx] = rank
 
     # 兜底：一个索引都没解析出来，但确实存在 srt（如手动的 <videoId>.ai-zh.srt），
     # 单 P 视频就把它当作 P1
@@ -443,6 +489,42 @@ def _find_srts(viddir):
         if len(loose) == 1:
             found[1] = loose[0]
     return found
+
+
+def rebuild_transcript(viddir, meta):
+    """按分 P 偏移把当前最优 SRT 合并成 transcript.jsonl（ASR 轨优先）。
+
+    返回 (records, part_stats, missing_parts)。ASR 转完必须调它，
+    否则 clean/quality 仍在读旧字幕，兜底等于没做。
+    """
+    srts = _find_srts(viddir)
+    parts = sorted(meta.get("parts") or [], key=lambda x: x["index"])
+    records, part_stats = [], []
+    for p in parts:
+        idx = p["index"]
+        if idx not in srts:
+            continue
+        off = p.get("offsetSec", 0) or 0
+        kept = 0
+        for s, e, text in parse_srt(srts[idx]):
+            records.append({
+                "idx": len(records),
+                "startSec": int(round(s + off)),
+                "endSec": int(round(e + off)),
+                "text": text,
+            })
+            kept += 1
+        part_stats.append({"index": idx, "segments": kept,
+                           "offsetSec": off, "durationSec": p.get("durationSec", 0),
+                           "srt": os.path.basename(srts[idx])})
+
+    tpath = os.path.join(viddir, "transcript.jsonl")
+    os.makedirs(os.path.dirname(tpath) or ".", exist_ok=True)
+    with open(tpath, "w", encoding="utf-8", newline="\n") as fh:
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    missing = [p["index"] for p in parts if p["index"] not in srts]
+    return records, part_stats, missing
 
 
 def cmd_build(args):
@@ -460,35 +542,10 @@ def cmd_build(args):
     if missing:
         sys.stderr.write(f"WARN: 分 P {missing} 没有字幕文件，将跳过。\n")
 
-    # ---- SRT → transcript.jsonl（按 P 偏移合并到整视频时间轴） ----
-    records = []
-    part_stats = []
-    for p in sorted(parts, key=lambda x: x["index"]):
-        idx = p["index"]
-        if idx not in srts:
-            continue
-        segs = parse_srt(srts[idx])
-        off = p.get("offsetSec", 0)
-        kept = 0
-        for s, e, text in segs:
-            gs, ge = s + off, e + off
-            records.append({
-                "idx": len(records),
-                "startSec": int(round(gs)),
-                "endSec": int(round(ge)),
-                "text": text,
-            })
-            kept += 1
-        part_stats.append({"index": idx, "segments": kept,
-                           "offsetSec": off, "durationSec": p.get("durationSec", 0),
-                           "srt": os.path.basename(srts[idx])})
-
+    # ---- SRT → transcript.jsonl（按 P 偏移合并到整视频时间轴；ASR 轨优先） ----
+    records, part_stats, _ = rebuild_transcript(viddir, meta)
     require(bool(records), "所有分 P 都解析出 0 段，字幕格式可能不受支持")
-
     transcript_path = os.path.join(viddir, "transcript.jsonl")
-    with open(transcript_path, "w", encoding="utf-8", newline="\n") as fh:
-        for r in records:
-            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
     print(f"[build] transcript.jsonl: {len(records)} 段 -> {transcript_path}")
 
     # ---- 清洗 + 切块（复用链里的 clean_transcript.py） ----
